@@ -33,6 +33,7 @@ PLATFORM_URLS = {
     "douyin": "https://www.douyin.com/",
     "tiktok": "https://www.tiktok.com/",
     "xiaohongshu": "https://www.xiaohongshu.com/",
+    "xinpianchang": "https://www.xinpianchang.com/",
     "bilibili": "https://www.bilibili.com/",
     "youtube": "https://www.youtube.com/",
     "twitter": "https://twitter.com/login",
@@ -44,6 +45,7 @@ PLATFORM_DOMAINS = {
     "douyin": "douyin.com",
     "tiktok": "tiktok.com",
     "xiaohongshu": "xiaohongshu.com",
+    "xinpianchang": "xinpianchang.com",
     "bilibili": "bilibili.com",
     "youtube": "youtube.com",
     "twitter": "twitter.com",
@@ -882,4 +884,3 @@ async def extract_cookies_from_browser(platform: str, browser: str = "chrome") -
             "error": f"提取 Cookie 失败: {str(e)}",
             "error_code": CookieErrorCode.INTERNAL_ERROR
         }
-

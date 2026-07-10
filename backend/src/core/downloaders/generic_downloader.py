@@ -91,12 +91,14 @@ class GenericDownloader(BaseDownloader):
                 }
 
             # 针对国内平台优化
-            if platform in ['xiaohongshu', 'douyin', 'weixin', 'tencent', 'youku', 'iqiyi', 'bilibili']:
+            if platform in ['xiaohongshu', 'xinpianchang', 'douyin', 'weixin', 'tencent', 'youku', 'iqiyi', 'bilibili']:
                 ydl_opts['geo_bypass'] = True
                 ydl_opts['geo_bypass_country'] = 'CN'
                 # 添加 Referer 避免403
                 if platform == 'xiaohongshu':
                     ydl_opts['http_headers']['Referer'] = 'https://www.xiaohongshu.com/'
+                elif platform == 'xinpianchang':
+                    ydl_opts['http_headers']['Referer'] = url.split('?')[0]
                 elif platform == 'bilibili':
                     ydl_opts['http_headers']['Referer'] = 'https://www.bilibili.com/'
                 elif platform in ['tencent', 'youku', 'iqiyi']:
@@ -221,12 +223,14 @@ class GenericDownloader(BaseDownloader):
                 }]
 
             # 针对国内平台优化
-            if platform in ['xiaohongshu', 'douyin', 'weixin', 'tencent', 'youku', 'iqiyi', 'bilibili']:
+            if platform in ['xiaohongshu', 'xinpianchang', 'douyin', 'weixin', 'tencent', 'youku', 'iqiyi', 'bilibili']:
                 ydl_opts['geo_bypass'] = True
                 ydl_opts['geo_bypass_country'] = 'CN'
                 # 添加 Referer 避免403
                 if platform == 'xiaohongshu':
                     ydl_opts['http_headers']['Referer'] = 'https://www.xiaohongshu.com/'
+                elif platform == 'xinpianchang':
+                    ydl_opts['http_headers']['Referer'] = url.split('?')[0]
                 elif platform == 'bilibili':
                     ydl_opts['http_headers']['Referer'] = 'https://www.bilibili.com/'
                 elif platform in ['tencent', 'youku', 'iqiyi']:
@@ -445,6 +449,8 @@ class GenericDownloader(BaseDownloader):
             return 'facebook'
         elif 'xiaohongshu.com' in url_lower:
             return 'xiaohongshu'
+        elif 'xinpianchang.com' in url_lower:
+            return 'xinpianchang'
         elif 'weixin' in url_lower or 'qq.com/channels' in url_lower:
             return 'weixin'
         elif 'v.qq.com' in url_lower:

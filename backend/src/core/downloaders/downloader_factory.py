@@ -135,6 +135,8 @@ class DownloaderFactory:
             return 'weixin'
         elif 'xiaohongshu.com' in url_lower or 'xhslink.com' in url_lower:
             return 'xiaohongshu'
+        elif 'xinpianchang.com' in url_lower:
+            return 'xinpianchang'
         elif 'v.qq.com' in url_lower:
             return 'tencent'
         elif 'youku.com' in url_lower:

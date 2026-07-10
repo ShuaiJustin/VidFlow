@@ -1691,6 +1691,13 @@ SUPPORTED_PLATFORMS = {
         "guide_url": "Docs/XIAOHONGSHU_COOKIE_GUIDE.md",
         "category": "short_video"
     },
+    "xinpianchang": {
+        "name": "新片场",
+        "filename": "xinpianchang_cookies.txt",
+        "description": "用于下载需要登录的新片场视频",
+        "guide_url": "backend/data/cookies/README.txt",
+        "category": "video_platform"
+    },
     "bilibili": {
         "name": "Bilibili",
         "filename": "bilibili_cookies.txt",
