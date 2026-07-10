@@ -24,6 +24,8 @@ let initializationInProgress = false; // Prevent concurrent initialization attem
 let initializationAttempts = 0;
 const MAX_INIT_ATTEMPTS = 10;
 let backendPortListenersRegistered = false;
+// The backend permits up to 180 seconds for a first-time WebDriver download.
+export const CONTROLLED_BROWSER_START_TIMEOUT_MS = 210_000;
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -1075,6 +1077,8 @@ export async function invoke(command: string, args?: any): Promise<any> {
         const res = await api.post('/api/v1/system/cookies/auto/start-browser', {
           platform: args?.platform,
           browser: args?.browser
+        }, {
+          timeout: CONTROLLED_BROWSER_START_TIMEOUT_MS,
         });
 
         // Convert backend business failures into thrown errors.
