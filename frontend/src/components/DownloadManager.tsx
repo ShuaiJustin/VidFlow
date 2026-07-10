@@ -54,6 +54,7 @@ const platformConfig: Record<string, { icon: any, color: string, name: string }>
   tiktok: { icon: Music, color: 'bg-black', name: 'TikTok' },
   weixin: { icon: Video, color: 'bg-green-500', name: '微信视频号' },
   xiaohongshu: { icon: PlayCircle, color: 'bg-red-400', name: '小红书' },
+  xinpianchang: { icon: PlayCircle, color: 'bg-emerald-600', name: '新片场' },
   iqiyi: { icon: PlayCircle, color: 'bg-green-600', name: '爱奇艺' },
   youku: { icon: PlayCircle, color: 'bg-blue-500', name: '优酷' },
   tencent: { icon: PlayCircle, color: 'bg-blue-600', name: '腾讯视频' },
@@ -65,10 +66,11 @@ const platformConfig: Record<string, { icon: any, color: string, name: string }>
 
 // 需要Cookie的平台列表（有反爬虫机制或需要登录）
 // 与后端 cookie_helper.py 中的 PLATFORM_URLS 保持一致
-const PLATFORMS_REQUIRING_COOKIE = [
+export const PLATFORMS_REQUIRING_COOKIE = [
   'douyin',      // 抖音
   'tiktok',      // TikTok
   'xiaohongshu', // 小红书
+  'xinpianchang', // 新片场
   'bilibili',    // B站（部分会员内容）
   'youtube',     // YouTube（部分会员内容）
   'twitter',     // Twitter/X
@@ -76,13 +78,14 @@ const PLATFORMS_REQUIRING_COOKIE = [
 ];
 
 // 平台检测函数（与后端 downloader_factory.py 保持一致）
-function detectPlatform(url: string): string {
+export function detectPlatform(url: string): string {
   const urlLower = url.toLowerCase();
   if (urlLower.includes('youtube.com') || urlLower.includes('youtu.be')) return 'youtube';
   if (urlLower.includes('bilibili.com') || urlLower.includes('b23.tv')) return 'bilibili';
   if (urlLower.includes('douyin.com') || urlLower.includes('v.douyin.com')) return 'douyin';
   if (urlLower.includes('tiktok.com')) return 'tiktok';
   if (urlLower.includes('xiaohongshu.com') || urlLower.includes('xhslink.com')) return 'xiaohongshu';
+  if (urlLower.includes('xinpianchang.com')) return 'xinpianchang';
   if (urlLower.includes('weixin') || urlLower.includes('qq.com/channels')) return 'weixin';
   if (urlLower.includes('v.qq.com')) return 'tencent';
   if (urlLower.includes('youku.com')) return 'youku';
@@ -91,6 +94,19 @@ function detectPlatform(url: string): string {
   if (urlLower.includes('instagram.com')) return 'instagram';
   if (urlLower.includes('facebook.com')) return 'facebook';
   return 'generic';
+}
+
+export function getPlatformConfig(platform?: string) {
+  return platformConfig[platform?.toLowerCase() || ''] || platformConfig.generic;
+}
+
+export function isPlatformCookieConfigured(
+  status: { platforms?: Array<{ platform: string; configured: boolean }> } | undefined,
+  platform: string,
+): boolean {
+  return status?.platforms?.some(
+    (item) => item.platform === platform && item.configured,
+  ) ?? false;
 }
 
 interface DownloadManagerProps {
@@ -170,8 +186,7 @@ export function DownloadManager({ onNavigateToSettings }: DownloadManagerProps =
   const checkCookieStatus = async (platform: string): Promise<boolean> => {
     try {
       const status = await invoke('get_cookies_status');
-      const platformStatus = status[platform];
-      return platformStatus?.exists || false;
+      return isPlatformCookieConfigured(status, platform);
     } catch (error) {
       console.error('Failed to check cookie status:', error);
       return false;
@@ -237,6 +252,7 @@ export function DownloadManager({ onNavigateToSettings }: DownloadManagerProps =
           douyin: '抖音',
           tiktok: 'TikTok',
           xiaohongshu: '小红书',
+          xinpianchang: '新片场',
           instagram: 'Instagram',
           twitter: 'Twitter/X'
         };
@@ -391,10 +407,6 @@ export function DownloadManager({ onNavigateToSettings }: DownloadManagerProps =
       cancelled: { variant: 'outline' as const, icon: AlertCircle, text: '已取消' },
     };
     return badges[status] || badges.pending;
-  };
-
-  const getPlatformConfig = (platform?: string) => {
-    return platformConfig[platform?.toLowerCase() || ''] || platformConfig.generic;
   };
 
   return (
