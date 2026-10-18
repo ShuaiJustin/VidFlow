@@ -30,6 +30,7 @@ interface UpdateDownloadedInfo {
   version?: string;
   type?: 'delta' | 'full';
   requiresRestart?: boolean;
+  manualInstall?: boolean;
 }
 
 export function CustomUpdateNotification() {
@@ -38,6 +39,8 @@ export function CustomUpdateNotification() {
   const [updateDownloaded, setUpdateDownloaded] = useState(false);
   const [applyingDelta, setApplyingDelta] = useState(false);
   const [downloadedUpdateType, setDownloadedUpdateType] = useState<'delta' | 'full'>('full');
+  const [downloading, setDownloading] = useState(false);
+  const [downloadPercent, setDownloadPercent] = useState(0);
 
   useEffect(() => {
     if (!window.electron) {
@@ -63,37 +66,44 @@ export function CustomUpdateNotification() {
         return;
       }
 
-      const backgroundMessage = info.delta_available && info.delta_info
-        ? `发现新版本 ${info.latest_version}，正在后台下载增量更新`
-        : `发现新版本 ${info.latest_version}，正在后台下载更新包`;
+      setShowCard(true);
 
-      toast.info(backgroundMessage, {
-        description: '下载完成后会提示你重启应用，无需手动安装'
-      });
+      toast.info(`发现新版本 ${info.latest_version}`, { description: '下载并校验完成后可以安装更新' });
     };
 
-    const handleUpdateNotAvailable = () => {
+    const handleUpdateNotAvailable = (info?: { status?: string; rollout_message?: string }) => {
       console.log('No update available');
+      setUpdateInfo(null);
+      setShowCard(false);
+      setUpdateDownloaded(false);
+      setDownloading(false);
+      if (info?.status && info.status !== 'up_to_date') {
+        toast.info('暂无可用更新', { description: info.rollout_message || '发布尚未对本设备开放，请稍后重试' });
+      }
     };
 
     const handleUpdateDownloaded = (info?: UpdateDownloadedInfo) => {
+      setDownloading(false);
       setApplyingDelta(false);
       setUpdateDownloaded(true);
       setShowCard(true);
       setDownloadedUpdateType(info?.type === 'delta' ? 'delta' : 'full');
 
       toast.success('更新已准备就绪', {
-        description: info?.type === 'delta'
+        description: info?.manualInstall
+          ? '更新包已校验，请打开安装包完成安装'
+          : info?.type === 'delta'
           ? '重启应用即可完成更新'
           : '重启应用后会静默完成安装',
         action: {
-          label: '立即重启',
+          label: info?.manualInstall ? '打开安装包' : '立即重启',
           onClick: handleInstall
         }
       });
     };
 
     const handleUpdateError = (error: string) => {
+      setDownloading(false);
       setApplyingDelta(false);
       toast.error('更新失败', {
         description: error
@@ -115,6 +125,10 @@ export function CustomUpdateNotification() {
       setApplyingDelta(false);
     };
 
+    const handleDownloadStart = () => { setDownloading(true); setDownloadPercent(0); };
+    const handleDownloadProgress = (progress: { percent: number }) => setDownloadPercent(progress.percent);
+    const handleDownloadCancelled = () => { setDownloading(false); toast.info('下载已取消，已保存进度'); };
+
     window.electron.on('update-checking', handleUpdateChecking);
     window.electron.on('update-available', handleUpdateAvailable);
     window.electron.on('update-not-available', handleUpdateNotAvailable);
@@ -123,6 +137,9 @@ export function CustomUpdateNotification() {
     window.electron.on('delta-fallback', handleDeltaFallback);
     window.electron.on('delta-apply-start', handleDeltaApplyStart);
     window.electron.on('delta-apply-complete', handleDeltaApplyComplete);
+    window.electron.on('download-start', handleDownloadStart);
+    window.electron.on('download-progress', handleDownloadProgress);
+    window.electron.on('download-cancelled', handleDownloadCancelled);
 
     return () => {
       if (!window.electron) {
@@ -137,16 +154,21 @@ export function CustomUpdateNotification() {
       window.electron.off('delta-fallback', handleDeltaFallback);
       window.electron.off('delta-apply-start', handleDeltaApplyStart);
       window.electron.off('delta-apply-complete', handleDeltaApplyComplete);
+      window.electron.off('download-start', handleDownloadStart);
+      window.electron.off('download-progress', handleDownloadProgress);
+      window.electron.off('download-cancelled', handleDownloadCancelled);
     };
   }, []);
 
   const handleInstall = async () => {
     try {
       setShowCard(false);
-      await window.electron?.installUpdate();
+      const result = await window.electron?.installUpdate();
+      if (!result?.success) throw new Error(result?.error || '安装器没有返回成功结果');
+      if (result.manualInstall) toast.info('请完成手动安装', { description: '更新包已打开；安装完成后再启动应用' });
     } catch (error) {
       setShowCard(true);
-      toast.error('重启更新失败', { description: String(error) });
+      toast.error('重启更新失败', { description: error instanceof Error ? error.message : String(error) });
     }
   };
 
@@ -154,6 +176,25 @@ export function CustomUpdateNotification() {
     if (!updateInfo?.is_mandatory) {
       setShowCard(false);
     }
+  };
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      const result = await window.electron?.downloadUpdate();
+      if (result?.cancelled) { setDownloading(false); return; }
+      if (!result?.success) throw new Error(result?.error || '下载没有返回成功结果');
+    } catch (error) {
+      setDownloading(false);
+      toast.error('下载更新失败', { description: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  const handleCancelDownload = async () => {
+    try {
+      const result = await window.electron?.cancelUpdateDownload();
+      if (!result?.success) throw new Error(result?.error || '取消下载失败');
+    } catch (error) { toast.error('取消下载失败', { description: error instanceof Error ? error.message : String(error) }); }
   };
 
   const formatBytes = (bytes: number) => {
@@ -173,10 +214,10 @@ export function CustomUpdateNotification() {
       return `增量更新包 ${formatBytes(updateInfo.delta_info.delta_size)}，重启即可生效`;
     }
 
-    return `完整更新包 ${formatBytes(updateInfo.file_size)}，重启后静默安装`;
+    return `完整更新包 ${formatBytes(updateInfo.file_size)}${window.electron?.platform === 'win32' ? '，安装时将重启应用' : '，需要手动完成安装'}`;
   };
 
-  if (!showCard || !updateInfo || !updateDownloaded) {
+  if (!showCard || !updateInfo || updateInfo.rollout_blocked) {
     return null;
   }
 
@@ -185,7 +226,7 @@ export function CustomUpdateNotification() {
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-sm font-medium text-blue-600 dark:text-blue-400">
-            更新已就绪
+            {downloading ? `正在下载 ${downloadPercent}%` : updateDownloaded ? '更新已就绪' : '发现新版本'}
           </p>
           <h2 className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
             VidFlow {updateInfo.latest_version}
@@ -238,13 +279,13 @@ export function CustomUpdateNotification() {
             稍后重启
           </button>
         )}
-        <button
-          onClick={handleInstall}
+        {downloading ? <button onClick={handleCancelDownload} className="flex-1 rounded-xl border border-gray-300 px-4 py-2 text-sm font-medium">取消下载</button> : <button
+          onClick={updateDownloaded ? handleInstall : handleDownload}
           disabled={applyingDelta}
           className="flex-1 rounded-xl bg-green-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-70"
         >
-          {applyingDelta ? '准备中...' : '立即重启'}
-        </button>
+          {applyingDelta ? '准备中...' : updateDownloaded ? (window.electron?.platform === 'win32' ? '立即重启' : '打开安装包') : '下载更新'}
+        </button>}
       </div>
     </div>
   );

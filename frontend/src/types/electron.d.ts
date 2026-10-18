@@ -24,6 +24,7 @@ interface UpdateInfo {
   rollout_message?: string;
   unavailable?: boolean;
   reason?: string;
+  status?: string;
   delta_available?: boolean;
   delta_info?: DeltaInfo | null;
   recommended_update_type?: 'delta' | 'full';
@@ -89,8 +90,9 @@ interface ElectronAPI {
   on: (channel: string, callback: (...args: any[]) => void) => void;
   off: (channel: string, callback: (...args: any[]) => void) => void;
   checkForUpdates: () => Promise<{ success: boolean; data?: UpdateInfo; error?: string }>;
-  downloadUpdate: () => Promise<{ success: boolean; type?: 'delta' | 'full'; error?: string }>;
-  installUpdate: () => Promise<{ success: boolean; error?: string }>;
+  downloadUpdate: () => Promise<{ success: boolean; cancelled?: boolean; type?: 'delta' | 'full'; error?: string }>;
+  installUpdate: () => Promise<{ success: boolean; manualInstall?: boolean; error?: string }>;
+  cancelUpdateDownload: () => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
   cleanUpdateFiles: () => Promise<{ success: boolean; message?: string; count?: number; size?: number; error?: string }>;
 
   // 平台信息

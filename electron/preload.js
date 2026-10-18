@@ -20,6 +20,7 @@ const VALID_INVOKE_CHANNELS = [
   'custom-update-download',
   'custom-update-install',
   'custom-update-clean',
+  'custom-update-cancel',
   'generate-video-thumbnail',
   'set-proxy-config',
   'restart-as-admin'
@@ -30,6 +31,8 @@ const VALID_EVENT_CHANNELS = [
   'update-available',
   'update-not-available',
   'download-progress',
+  'download-start',
+  'download-cancelled',
   'update-downloaded',
   'update-error',
   'delta-fallback',
@@ -124,6 +127,7 @@ contextBridge.exposeInMainWorld('electron', {
   checkForUpdates: () => ipcRenderer.invoke('custom-update-check'),
   downloadUpdate: () => ipcRenderer.invoke('custom-update-download'),
   installUpdate: () => ipcRenderer.invoke('custom-update-install'),
+  cancelUpdateDownload: () => ipcRenderer.invoke('custom-update-cancel'),
   cleanUpdateFiles: () => ipcRenderer.invoke('custom-update-clean'),
 
   // 平台信息

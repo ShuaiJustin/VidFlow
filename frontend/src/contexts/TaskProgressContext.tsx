@@ -82,7 +82,7 @@ export interface VideoInfoState {
   url: string;
   info: VideoInfo | null;
   loading: boolean;
-  cookieWarning: { platform: string; platformName: string } | null;
+  cookieWarning: { platform: string; platformName: string; reason?: 'security_check' } | null;
 }
 
 export interface VideoInfo {
@@ -91,7 +91,7 @@ export interface VideoInfo {
   platform?: string;
   thumbnail?: string;
   quality?: string[];
-  formats: { ext: string }[];
+  formats: { ext: string; height?: number; quality?: string; format_id?: string }[];
   downloader_used?: string;
   fallback_used?: boolean;
   fallback_reason?: string;
@@ -111,7 +111,7 @@ interface TaskProgressContextType {
   setVideoInfoUrl: (url: string) => void;
   setVideoInfo: (info: VideoInfo | null) => void;
   setVideoInfoLoading: (loading: boolean) => void;
-  setVideoCookieWarning: (warning: { platform: string; platformName: string } | null) => void;
+  setVideoCookieWarning: (warning: { platform: string; platformName: string; reason?: 'security_check' } | null) => void;
   clearVideoInfo: () => void;
 }
 
@@ -162,7 +162,7 @@ export function TaskProgressProvider({ children }: { children: ReactNode }) {
     setVideoInfoState(prev => ({ ...prev, loading }));
   }, []);
 
-  const setVideoCookieWarning = useCallback((warning: { platform: string; platformName: string } | null) => {
+  const setVideoCookieWarning = useCallback((warning: { platform: string; platformName: string; reason?: 'security_check' } | null) => {
     setVideoInfoState(prev => ({ ...prev, cookieWarning: warning }));
   }, []);
 
@@ -406,6 +406,10 @@ export function TaskProgressProvider({ children }: { children: ReactNode }) {
                 total: data.total ?? data.total_bytes,
                 speed: data.speed,
                 eta: data.eta,
+                quality: data.quality ?? currentTask.quality,
+                filename: data.filename ?? currentTask.filename,
+                file_path: data.file_path ?? currentTask.file_path,
+                filesize: data.filesize ?? currentTask.filesize,
                 // 只有当 WebSocket 消息包含 status 时才更新，否则保持当前状态
                 status: data.status || currentTask.status
               } as Partial<DownloadTask>;

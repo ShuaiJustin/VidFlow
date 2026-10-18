@@ -6,6 +6,41 @@ from unittest.mock import AsyncMock, patch
 from fastapi import status
 from httpx import AsyncClient, ASGITransport
 from src.main import app
+from src.api import downloads as downloads_api
+from src.models.download import DownloadTask
+
+
+def test_apply_download_result_uses_actual_quality():
+    task = DownloadTask(
+        task_id='quality-result',
+        url='https://www.xinpianchang.com/a13685467',
+        quality='1080p',
+        status='downloading',
+    )
+
+    downloads_api._apply_download_result(task, {
+        'filename': 'OPPO - FIND X_1080p.mp4',
+        'filesize': 6375673,
+        'actual_quality': '720p',
+    })
+
+    assert task.status == 'completed'
+    assert task.quality == '720p'
+    assert task.filename == 'OPPO - FIND X_1080p.mp4'
+
+
+def test_resolve_requested_quality_uses_highest_available_xinpianchang_format():
+    video_info = {
+        'platform': 'xinpianchang',
+        'formats': [
+            {'height': 720, 'quality': '720p'},
+            {'height': 540, 'quality': '540p'},
+        ],
+    }
+
+    assert downloads_api._resolve_requested_quality('1080p', video_info) == '720p'
+    assert downloads_api._resolve_requested_quality('540p', video_info) == '540p'
+    assert downloads_api._resolve_requested_quality('best', video_info) == 'best'
 
 
 @pytest.mark.api

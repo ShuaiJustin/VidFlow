@@ -4,16 +4,35 @@
 """
 import asyncio
 import logging
+import re
+from html.parser import HTMLParser
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
+import httpx
 import yt_dlp
 from src.core.tool_manager import get_tool_manager
-from src.core.cookie_storage import cookiefile_for_ytdlp
+from src.core.cookie_storage import cookiefile_for_ytdlp, read_cookie_file
+from src.core.cookie_helper import get_browser_page_capture
 from .base_downloader import BaseDownloader
 from .proxy_config import get_ydl_proxy_opts
 
 logger = logging.getLogger(__name__)
+
+
+class _NextBuildIdParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.build_id: Optional[str] = None
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag != 'script' or self.build_id:
+            return
+        source = dict(attrs).get('src') or ''
+        match = re.search(r'/_next/static/([^/]+)/_buildManifest\.js$', urlsplit(source).path)
+        if match:
+            self.build_id = match.group(1)
 
 
 class GenericDownloader(BaseDownloader):
@@ -45,6 +64,155 @@ class GenericDownloader(BaseDownloader):
             return converted_url
         return url
 
+    def _get_xinpianchang_http_cookies(self, url: str) -> Optional[httpx.Cookies]:
+        cookie_path = self._get_platform_cookie_path(url)
+        if not cookie_path:
+            return None
+
+        try:
+            content = read_cookie_file(cookie_path, migrate=False)
+            cookies = httpx.Cookies()
+            cookie_count = 0
+            for raw_line in content.splitlines():
+                line = raw_line.strip()
+                if line.startswith('#HttpOnly_'):
+                    line = line[len('#HttpOnly_'):]
+                elif not line or line.startswith('#'):
+                    continue
+
+                parts = line.split('\t')
+                if len(parts) < 7:
+                    continue
+                domain, _, path, _, _, name, value = parts[:7]
+                if not domain or not path or not name:
+                    continue
+                cookies.set(name, value, domain=domain, path=path)
+                cookie_count += 1
+
+            return cookies if cookie_count else None
+        except Exception as error:
+            logger.warning('读取新片场 Cookie 失败，将使用公开清晰度: %s', error)
+            return None
+
+    async def _extract_xinpianchang_public_info(self, url: str) -> Dict[str, Any]:
+        article_match = re.search(r'xinpianchang\.com/a(?P<id>\d+)', url, re.IGNORECASE)
+        if not article_match:
+            raise ValueError('无效的新片场作品链接')
+
+        article_id = article_match.group('id')
+        canonical_url = f'https://www.xinpianchang.com/a{article_id}'
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/131.0.0.0 Safari/537.36'
+            ),
+            'Accept': 'application/json,text/html;q=0.9,*/*;q=0.8',
+            'Referer': canonical_url,
+        }
+
+        cookies = self._get_xinpianchang_http_cookies(url)
+        async with httpx.AsyncClient(
+            headers=headers,
+            cookies=cookies,
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            follow_redirects=True,
+        ) as client:
+            build_response = await client.get('https://www.xinpianchang.com/_next/static/BUILD_ID')
+            parser = _NextBuildIdParser()
+            parser.feed(build_response.text)
+            if not parser.build_id:
+                raise RuntimeError('无法获取新片场页面版本')
+
+            detail_response = await client.get(
+                f'https://www.xinpianchang.com/_next/data/{parser.build_id}/a{article_id}.json'
+            )
+            detail_response.raise_for_status()
+            detail = detail_response.json().get('pageProps', {}).get('detail', {})
+            video = detail.get('video') or {}
+            video_id = str(video.get('vid') or '').strip()
+            app_key = str(video.get('appKey') or '').strip()
+            if not video_id or not app_key:
+                raise RuntimeError('新片场作品缺少媒体标识')
+
+            media_response = await client.get(
+                f'https://mod-api.xinpianchang.com/mod/api/v2/media/{video_id}',
+                params={'appKey': app_key},
+            )
+            media_response.raise_for_status()
+            media_payload = media_response.json()
+
+        if media_payload.get('status') != 0 or not isinstance(media_payload.get('data'), dict):
+            raise RuntimeError(str(media_payload.get('message') or '新片场媒体接口返回异常'))
+
+        media = media_payload['data']
+        formats = []
+        for item in media.get('resource', {}).get('progressive', []):
+            media_url = str(item.get('url') or '').strip()
+            if not media_url:
+                continue
+            quality = str(item.get('quality') or item.get('profile') or item.get('resourceId') or 'mp4')
+            codec_name = str(item.get('codecName') or '').lower()
+            formats.append({
+                'format_id': quality,
+                'url': media_url,
+                'ext': 'mp4',
+                'width': item.get('width'),
+                'height': item.get('height'),
+                'filesize': item.get('filesize'),
+                'tbr': item.get('bitrate'),
+                'format_note': quality,
+                'vcodec': 'h264' if 'h264' in codec_name else None,
+                'acodec': 'aac' if 'aac' in codec_name else None,
+                'http_headers': {'Range': 'bytes=0-', 'Referer': canonical_url},
+            })
+
+        if not formats:
+            raise RuntimeError('新片场作品没有可下载的视频清晰度')
+
+        owner = media.get('owner') or {}
+        return {
+            'id': f'a{article_id}',
+            'title': media.get('title') or detail.get('title') or f'新片场作品 {article_id}',
+            'description': media.get('description') or '',
+            'duration': media.get('duration') or detail.get('duration') or 0,
+            'thumbnail': media.get('cover') or detail.get('cover') or '',
+            'uploader': owner.get('username') or 'Unknown',
+            'uploader_id': str(owner.get('id') or ''),
+            'webpage_url': canonical_url,
+            'extractor': 'XinpianchangPublicData',
+            'formats': formats,
+        }
+
+    def _public_xinpianchang_video_info(self, info: Dict[str, Any], url: str) -> Dict[str, Any]:
+        formats = []
+        for item in info.get('formats') or []:
+            formats.append({
+                'format_id': item.get('format_id', ''),
+                'ext': item.get('ext', 'mp4'),
+                'quality': item.get('format_note', ''),
+                'filesize': item.get('filesize', 0),
+                'vcodec': item.get('vcodec', ''),
+                'acodec': item.get('acodec', ''),
+                'height': item.get('height', 0),
+                'width': item.get('width', 0),
+                'fps': item.get('fps', 0),
+                'url': item.get('url', ''),
+            })
+        return {
+            'title': info.get('title', '新片场视频'),
+            'duration': info.get('duration', 0),
+            'thumbnail': info.get('thumbnail', ''),
+            'description': info.get('description', ''),
+            'uploader': info.get('uploader', 'Unknown'),
+            'upload_date': '',
+            'view_count': 0,
+            'platform': 'xinpianchang',
+            'formats': formats,
+            'url': url,
+            'browser_capture': False,
+        }
+
     async def get_video_info(self, url: str) -> Dict[str, Any]:
         """获取视频信息"""
         try:
@@ -53,14 +221,44 @@ class GenericDownloader(BaseDownloader):
             if 'vimeo.com' in url.lower() and 'player.vimeo.com' not in url.lower():
                 url = self._convert_vimeo_url(url)
 
+            platform = self._detect_platform(url)
+            if platform == 'xinpianchang':
+                try:
+                    public_info = await self._extract_xinpianchang_public_info(url)
+                    video_info = self._public_xinpianchang_video_info(public_info, url)
+                    self._cache_info(url, video_info)
+                    return video_info
+                except Exception as public_error:
+                    logger.warning('新片场公开数据解析失败，尝试浏览器捕获: %s', public_error)
+
+                capture = get_browser_page_capture(url)
+                if capture:
+                    media_path = urlsplit(capture['media_url']).path
+                    extension = Path(media_path).suffix.lstrip('.').lower() or 'mp4'
+                    return {
+                        'title': capture['title'],
+                        'duration': capture['duration'],
+                        'thumbnail': capture['thumbnail'],
+                        'description': capture['description'],
+                        'uploader': 'Unknown',
+                        'upload_date': '',
+                        'view_count': 0,
+                        'platform': platform,
+                        'formats': [{
+                            'format_id': 'browser',
+                            'ext': extension,
+                            'quality': 'original',
+                            'url': capture['media_url'],
+                        }],
+                        'url': url,
+                        'browser_capture': True,
+                    }
+
             # 检查缓存
             cached_info = self._get_cached_info(url)
             if cached_info:
                 logger.debug(f"Using cached info for: {url}")
                 return cached_info
-
-            # 检测平台以优化配置
-            platform = self._detect_platform(url)
 
             ydl_opts = {
                 'quiet': True,
@@ -180,6 +378,17 @@ class GenericDownloader(BaseDownloader):
 
             # 检测平台以优化配置
             platform = self._detect_platform(url)
+            download_url = url
+            browser_capture = None
+            resolved_info = None
+            if platform == 'xinpianchang':
+                try:
+                    resolved_info = await self._extract_xinpianchang_public_info(url)
+                except Exception as public_error:
+                    logger.warning('新片场公开数据解析失败，尝试浏览器捕获: %s', public_error)
+                    browser_capture = get_browser_page_capture(url)
+                    if browser_capture:
+                        download_url = browser_capture['media_url']
 
             # 通用下载选项
             ydl_opts = {
@@ -235,6 +444,10 @@ class GenericDownloader(BaseDownloader):
                     ydl_opts['http_headers']['Referer'] = 'https://www.bilibili.com/'
                 elif platform in ['tencent', 'youku', 'iqiyi']:
                     ydl_opts['http_headers']['Referer'] = url.split('?')[0]
+
+            if browser_capture:
+                safe_title = self._sanitize_filename(browser_capture['title']) or '新片场视频'
+                ydl_opts['outtmpl'] = str(Path(output_path) / f'{safe_title}_{quality}.%(ext)s')
 
             # Vimeo 优化
             if platform == 'vimeo':
@@ -391,12 +604,35 @@ class GenericDownloader(BaseDownloader):
 
             def _download():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
+                    info = (
+                        ydl.process_ie_result(resolved_info, download=True)
+                        if resolved_info is not None
+                        else ydl.extract_info(download_url, download=True)
+                    )
+                    format_entries = [info]
+                    format_entries.extend(info.get('requested_downloads') or [])
+                    format_entries.extend(info.get('requested_formats') or [])
+                    heights = [
+                        int(entry.get('height'))
+                        for entry in format_entries
+                        if entry.get('height')
+                    ]
+                    actual_quality = f'{max(heights)}p' if heights else None
+                    if not actual_quality:
+                        quality_text = ' '.join(str(value or '') for value in (
+                            info.get('format_id'),
+                            info.get('format_note'),
+                            info.get('resolution'),
+                        ))
+                        quality_match = re.search(r'(?<!\d)(\d{3,4})p\b', quality_text, re.IGNORECASE)
+                        if quality_match:
+                            actual_quality = f'{quality_match.group(1)}p'
                     return {
-                        'title': info.get('title', 'Unknown'),
+                        'title': browser_capture['title'] if browser_capture else info.get('title', 'Unknown'),
                         'filename': ydl.prepare_filename(info),
-                        'duration': info.get('duration', 0),
+                        'duration': browser_capture['duration'] if browser_capture else info.get('duration', 0),
                         'filesize': info.get('filesize', 0),
+                        'actual_quality': actual_quality,
                     }
 
             with cookiefile_for_ytdlp(cookie_path) as ytdlp_cookie_path:
@@ -414,7 +650,8 @@ class GenericDownloader(BaseDownloader):
                 'filename': result['filename'],
                 'duration': result['duration'],
                 'filesize': result['filesize'],
-                'platform': self._detect_platform(url),
+                'actual_quality': result['actual_quality'],
+                'platform': platform,
                 'download_time': datetime.now().isoformat()
             }
 

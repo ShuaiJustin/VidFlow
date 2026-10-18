@@ -12,6 +12,10 @@ import time
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
+
+from src.core.chrome_cdp import ChromeCdpError, ChromeCdpSession, find_chrome_executable
+from src.core.config_manager import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +65,24 @@ class CookieBrowserManager:
 
     def __init__(self):
         self.driver = None
+        self.cdp_session = None
         self.current_platform = None
+        self.current_browser = None
+        self.page_captures: Dict[str, Dict] = {}
         self.is_running = False
         self.executor = ThreadPoolExecutor(max_workers=1)
         self._selenium_import_error = None
 
     def cleanup(self):
         """清理资源"""
+        if self.cdp_session:
+            try:
+                self.cdp_session.close()
+            except Exception as e:
+                logger.error(f"关闭新片场专用 Chrome 失败: {e}")
+            finally:
+                self.cdp_session = None
+
         if self.driver:
             driver_pid = None
             try:
@@ -99,6 +114,7 @@ class CookieBrowserManager:
                 self.driver = None
 
         self.current_platform = None
+        self.current_browser = None
         self.is_running = False
 
     def is_selenium_available(self) -> bool:
@@ -112,7 +128,97 @@ class CookieBrowserManager:
             self._selenium_import_error = str(e)
             return False
 
-    async def start_browser(self, platform: str, browser: str = "chrome") -> Dict:
+    def _resolve_target_url(self, platform: str, target_url: Optional[str] = None) -> str:
+        fallback_url = PLATFORM_URLS[platform]
+        if not target_url or not isinstance(target_url, str):
+            return fallback_url
+
+        try:
+            parsed = urlsplit(target_url)
+            hostname = (parsed.hostname or "").lower()
+            platform_domain = PLATFORM_DOMAINS[platform].lower()
+            if (
+                parsed.scheme.lower() in ("http", "https")
+                and (hostname == platform_domain or hostname.endswith(f".{platform_domain}"))
+            ):
+                return target_url
+        except (TypeError, ValueError):
+            pass
+
+        return fallback_url
+
+    @staticmethod
+    def _page_capture_key(url: str) -> str:
+        try:
+            parsed = urlsplit(url)
+            hostname = (parsed.hostname or '').lower()
+            path = parsed.path.rstrip('/') or '/'
+            return f'{hostname}{path}'
+        except (TypeError, ValueError):
+            return ''
+
+    def get_page_capture(self, url: str) -> Optional[Dict]:
+        capture = self.page_captures.get(self._page_capture_key(url))
+        return dict(capture) if capture else None
+
+    def _capture_xinpianchang_page(self, current_url: str) -> Optional[Dict]:
+        if self.current_platform != 'xinpianchang' or not self.driver:
+            return None
+
+        capture = self.driver.execute_script("""
+            const getMeta = (property) =>
+                document.querySelector(`meta[property="${property}"]`)?.content || '';
+            const video = document.querySelector('video');
+            return {
+                page_url: window.location.href,
+                title: getMeta('og:title') || document.title || '',
+                description: getMeta('og:description'),
+                thumbnail: getMeta('og:image') || video?.poster || '',
+                media_url: video?.currentSrc || video?.src || '',
+                duration: Number.isFinite(video?.duration) ? video.duration : 0,
+            };
+        """) or {}
+
+        return self._store_xinpianchang_capture(capture, current_url)
+
+    def _store_xinpianchang_capture(
+        self,
+        capture: Optional[Dict],
+        current_url: str,
+    ) -> Optional[Dict]:
+        capture = capture or {}
+        page_url = str(capture.get('page_url') or current_url)
+        media_url = str(capture.get('media_url') or '')
+        try:
+            media_host = (urlsplit(media_url).hostname or '').lower()
+            media_scheme = urlsplit(media_url).scheme.lower()
+        except (TypeError, ValueError):
+            return None
+
+        if media_scheme not in ('http', 'https') or not (
+            media_host == 'xpccdn.com' or media_host.endswith('.xpccdn.com')
+        ):
+            return None
+
+        normalized_capture = {
+            'page_url': page_url,
+            'title': str(capture.get('title') or '新片场视频'),
+            'description': str(capture.get('description') or ''),
+            'thumbnail': str(capture.get('thumbnail') or ''),
+            'media_url': media_url,
+            'duration': float(capture.get('duration') or 0),
+            'captured_at': time.time(),
+        }
+        self.page_captures[self._page_capture_key(page_url)] = normalized_capture
+        logger.info('已从受控浏览器捕获新片场播放器地址')
+        return normalized_capture
+
+    async def start_browser(
+        self,
+        platform: str,
+        browser: str = "chrome",
+        target_url: Optional[str] = None,
+    ) -> Dict:
         """
         启动受控浏览器窗口
 
@@ -124,7 +230,16 @@ class CookieBrowserManager:
             {"status": "success", "message": "浏览器已启动"} 或
             {"status": "error", "error": "错误信息", "error_code": "错误代码", "should_reset": bool}
         """
-        if not self.is_selenium_available():
+        use_xinpianchang_cdp = platform == 'xinpianchang'
+        if use_xinpianchang_cdp and browser.lower() != 'chrome':
+            return {
+                "status": "error",
+                "error": "新片场安全验证目前仅支持 Chrome。请选择 Chrome 后重试。",
+                "error_code": "XINPIANCHANG_CHROME_REQUIRED",
+                "should_reset": False,
+            }
+
+        if not use_xinpianchang_cdp and not self.is_selenium_available():
             import sys
 
             detail = self._selenium_import_error
@@ -169,11 +284,13 @@ class CookieBrowserManager:
                 self.executor,
                 self._start_browser_sync,
                 platform,
-                browser.lower()
+                browser.lower(),
+                target_url,
             )
 
             if result.get("status") == "success":
                 self.current_platform = platform
+                self.current_browser = browser.lower()
                 self.is_running = True
 
             return result
@@ -188,11 +305,19 @@ class CookieBrowserManager:
                 "should_reset": True
             }
 
-    def _start_browser_sync(self, platform: str, browser: str = "chrome") -> Dict:
+    def _start_browser_sync(
+        self,
+        platform: str,
+        browser: str = "chrome",
+        target_url: Optional[str] = None,
+    ) -> Dict:
         """
         同步方法：启动浏览器（在线程池中执行）
         支持 Chrome, Edge, Firefox
         """
+        if platform == 'xinpianchang' and browser == 'chrome':
+            return self._start_xinpianchang_cdp_sync(target_url)
+
         try:
             from selenium import webdriver
             import threading
@@ -380,7 +505,7 @@ class CookieBrowserManager:
                         logger.warning(f"移除 webdriver 标志失败: {e}")
 
                 # 打开登录页面
-                url = PLATFORM_URLS[platform]
+                url = self._resolve_target_url(platform, target_url)
                 logger.info(f"[3/3] 正在打开登录页面: {url}")
                 self.driver.get(url)
 
@@ -461,6 +586,44 @@ class CookieBrowserManager:
                 "error_code": CookieErrorCode.SELENIUM_NOT_INSTALLED,
                 "should_reset": True
             }
+
+    def _start_xinpianchang_cdp_sync(self, target_url: Optional[str]) -> Dict:
+        url = self._resolve_target_url('xinpianchang', target_url)
+        chrome_path = find_chrome_executable()
+        if not chrome_path:
+            return {
+                "status": "error",
+                "error": "未找到 Google Chrome，请先安装 Chrome 后重试。",
+                "error_code": CookieErrorCode.CHROME_NOT_FOUND,
+                "should_reset": True,
+            }
+
+        profile_dir = DATA_DIR / 'browser_profiles' / 'xinpianchang_chrome'
+        session = ChromeCdpSession(chrome_path, profile_dir)
+        try:
+            info = session.start(url)
+            self.cdp_session = session
+            logger.info(
+                "已启动新片场专用 Chrome（无 WebDriver），配置目录: %s",
+                profile_dir,
+            )
+            return {
+                "status": "success",
+                "message": "专用 Chrome 已启动。请手动完成安全验证并等待视频开始播放，然后点击“完成登录”。",
+                "platform": "xinpianchang",
+                "url": url,
+                "current_url": info.get('current_url') or url,
+                "navigation_ok": True,
+                "browser_mode": "chrome_cdp",
+            }
+        except (ChromeCdpError, OSError) as error:
+            session.close()
+            return {
+                "status": "error",
+                "error": f"启动新片场专用 Chrome 失败: {error}",
+                "error_code": "CHROME_CDP_START_FAILED",
+                "should_reset": True,
+            }
         except Exception as e:
             logger.error(f"启动浏览器失败: {e}")
             self.cleanup()
@@ -530,7 +693,7 @@ class CookieBrowserManager:
         Returns:
             {"status": "success", "content": "Cookie内容", "count": Cookie数量}
         """
-        if not self.is_running or not self.driver:
+        if not self.is_running or (not self.driver and not self.cdp_session):
             return {
                 "status": "error",
                 "error": "浏览器未运行，请先启动浏览器"
@@ -558,7 +721,7 @@ class CookieBrowserManager:
         """
         try:
             # 检查浏览器是否已关闭
-            if not self.driver:
+            if not self.driver and not self.cdp_session:
                 return {
                     "status": "error",
                     "error": "浏览器未运行",
@@ -566,13 +729,16 @@ class CookieBrowserManager:
                     "should_reset": True
                 }
 
+            cdp_snapshot = None
             try:
-                # 尝试切换到最新的窗口（防止用户在只有新标签页保留的情况下操作）
-                if self.driver.window_handles:
-                    self.driver.switch_to.window(self.driver.window_handles[-1])
-
-                # 检查浏览器当前 URL
-                current_url = self.driver.current_url
+                if self.cdp_session:
+                    cdp_snapshot = self.cdp_session.snapshot()
+                    current_url = str(cdp_snapshot.get('current_url') or '')
+                else:
+                    # 尝试切换到最新的窗口（防止用户在只有新标签页保留的情况下操作）
+                    if self.driver.window_handles:
+                        self.driver.switch_to.window(self.driver.window_handles[-1])
+                    current_url = self.driver.current_url
                 logger.info(f"正在从 URL 提取 Cookie: {current_url}")
             except Exception as session_error:
                 # 浏览器已关闭，清理资源
@@ -591,19 +757,37 @@ class CookieBrowserManager:
             logger.info(f"提取 {platform} Cookie (目标域名: {domain})...")
 
             # 获取 Cookie
-            cookies = []
-            max_attempts = 5
-            delay = 0.5
-            for attempt in range(1, max_attempts + 1):
-                cookies = self.driver.get_cookies()
-                if cookies:
-                    break
-                if attempt < max_attempts:
-                    logger.warning(f"未找到任何 Cookie，{delay:.1f} 秒后重试（{attempt}/{max_attempts}）...")
-                    time.sleep(delay)
-                    delay = min(delay * 2, 5)
+            cookies = list(cdp_snapshot.get('cookies') or []) if cdp_snapshot else []
+            if cdp_snapshot is None:
+                max_attempts = 5
+                delay = 0.5
+                for attempt in range(1, max_attempts + 1):
+                    cookies = self.driver.get_cookies()
+                    if cookies:
+                        break
+                    if attempt < max_attempts:
+                        logger.warning(f"未找到任何 Cookie，{delay:.1f} 秒后重试（{attempt}/{max_attempts}）...")
+                        time.sleep(delay)
+                        delay = min(delay * 2, 5)
 
-            if not cookies:
+            capture = None
+            if platform == 'xinpianchang' and '/a' in urlsplit(current_url).path:
+                if cdp_snapshot is not None:
+                    capture = self._store_xinpianchang_capture(
+                        cdp_snapshot.get('capture'),
+                        current_url,
+                    )
+                else:
+                    capture = self._capture_xinpianchang_page(current_url)
+                if not capture:
+                    return {
+                        "status": "error",
+                        "error": "尚未检测到视频播放器。请先完成安全验证并等待视频页面加载完成，然后再次点击“完成登录”。",
+                        "error_code": "VIDEO_NOT_READY",
+                        "should_reset": False,
+                    }
+
+            if not cookies and not capture:
                 return {
                     "status": "error",
                     "error": "未检测到 Cookie，请确保您已登录",
@@ -665,11 +849,12 @@ class CookieBrowserManager:
         获取当前状态
 
         Returns:
-            {"is_running": bool, "platform": str}
+            {"is_running": bool, "platform": str, "browser": str}
         """
         return {
             "is_running": self.is_running,
             "platform": self.current_platform,
+            "browser": self.current_browser,
             "selenium_available": self.is_selenium_available()
         }
 
@@ -680,6 +865,10 @@ def get_cookie_browser_manager() -> CookieBrowserManager:
     if _cookie_browser_manager is None:
         _cookie_browser_manager = CookieBrowserManager()
     return _cookie_browser_manager
+
+
+def get_browser_page_capture(url: str) -> Optional[Dict]:
+    return get_cookie_browser_manager().get_page_capture(url)
 
 
 # 便捷函数

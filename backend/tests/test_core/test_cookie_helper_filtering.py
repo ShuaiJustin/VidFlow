@@ -139,6 +139,137 @@ class TestCookieFiltering:
                 assert fields[1] == 'FALSE'  # 不以 . 开头，flag 应该是 FALSE
 
 
+class TestManagedBrowserSessionStatus:
+    def test_xinpianchang_cdp_capture_succeeds_without_session_cookies(self):
+        class CdpSession:
+            def snapshot(self):
+                return {
+                    'current_url': 'https://www.xinpianchang.com/a13685467',
+                    'cookies': [],
+                    'capture': {
+                        'page_url': 'https://www.xinpianchang.com/a13685467',
+                        'title': 'Persisted verified profile',
+                        'description': '',
+                        'thumbnail': '',
+                        'media_url': 'https://us-xpc5-l2.xpccdn.com/video.mp4?signature=valid',
+                        'duration': 18.5,
+                    },
+                }
+
+        helper = CookieBrowserManager()
+        helper.cdp_session = CdpSession()
+        helper.is_running = True
+        helper.current_platform = 'xinpianchang'
+        helper.current_browser = 'chrome'
+
+        result = helper._extract_cookies_sync()
+
+        assert result['status'] == 'success'
+        assert result['count'] == 0
+        assert helper.get_page_capture('https://www.xinpianchang.com/a13685467')
+
+    def test_extract_cookies_uses_xinpianchang_cdp_session(self):
+        class CdpSession:
+            def snapshot(self):
+                return {
+                    'current_url': 'https://www.xinpianchang.com/a13685467',
+                    'cookies': [{
+                        'name': 'FECW',
+                        'value': 'verified',
+                        'domain': '.xinpianchang.com',
+                        'path': '/',
+                        'secure': True,
+                        'expiry': 1818336339,
+                    }],
+                    'capture': {
+                        'page_url': 'https://www.xinpianchang.com/a13685467',
+                        'title': 'CDP verified video',
+                        'description': '',
+                        'thumbnail': '',
+                        'media_url': 'https://us-xpc5-l2.xpccdn.com/video.mp4?signature=valid',
+                        'duration': 18.5,
+                    },
+                }
+
+        helper = CookieBrowserManager()
+        helper.cdp_session = CdpSession()
+        helper.is_running = True
+        helper.current_platform = 'xinpianchang'
+        helper.current_browser = 'chrome'
+
+        result = helper._extract_cookies_sync()
+        capture = helper.get_page_capture('https://www.xinpianchang.com/a13685467')
+
+        assert result['status'] == 'success'
+        assert 'FECW' in result['content']
+        assert capture['title'] == 'CDP verified video'
+
+    def test_status_includes_active_browser_for_session_recovery(self):
+        """The UI needs the original browser when restoring a managed session."""
+        helper = CookieBrowserManager()
+        helper.is_running = True
+        helper.current_platform = 'xinpianchang'
+        helper.current_browser = 'chrome'
+
+        status = helper.get_status()
+
+        assert status['is_running'] is True
+        assert status['platform'] == 'xinpianchang'
+        assert status['browser'] == 'chrome'
+
+    def test_target_url_is_limited_to_the_platform_domain(self):
+        helper = CookieBrowserManager()
+        target = 'https://www.xinpianchang.com/a13685467?from=search'
+
+        assert helper._resolve_target_url('xinpianchang', target) == target
+        assert helper._resolve_target_url(
+            'xinpianchang',
+            'https://example.com/not-allowed',
+        ) == 'https://www.xinpianchang.com/'
+
+    def test_extract_cookies_captures_xinpianchang_media_before_browser_closes(self):
+        class SwitchTo:
+            def window(self, _handle):
+                return None
+
+        class Driver:
+            window_handles = ['main']
+            switch_to = SwitchTo()
+            current_url = 'https://www.xinpianchang.com/a13727498?from=ArticleList'
+
+            def get_cookies(self):
+                return [{
+                    'name': '__ws_ch_ck',
+                    'value': 'challenge',
+                    'domain': '.xinpianchang.com',
+                    'path': '/',
+                    'secure': True,
+                    'expiry': 1818336339,
+                }]
+
+            def execute_script(self, _script):
+                return {
+                    'page_url': self.current_url,
+                    'title': 'Browser verified video',
+                    'description': 'Captured in the verified browser session',
+                    'thumbnail': 'https://cdn.example/poster.jpg',
+                    'media_url': 'https://us-xpc5-l2.xpccdn.com/video.mp4?signature=valid',
+                    'duration': 42.5,
+                }
+
+        helper = CookieBrowserManager()
+        helper.driver = Driver()
+        helper.is_running = True
+        helper.current_platform = 'xinpianchang'
+
+        result = helper._extract_cookies_sync()
+        capture = helper.get_page_capture('https://www.xinpianchang.com/a13727498')
+
+        assert result['status'] == 'success'
+        assert capture['title'] == 'Browser verified video'
+        assert capture['media_url'].startswith('https://us-xpc5-l2.xpccdn.com/video.mp4')
+
+
 class TestRealWorldScenario:
     """测试真实场景"""
 

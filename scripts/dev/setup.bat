@@ -191,27 +191,24 @@ echo.
 
 cd backend
 
-if exist "venv" (
-    echo [INFO] Virtual environment exists, skipping...
-    echo [HINT] To rebuild with Python 3.11, delete 'backend\venv' and run setup.bat again
-) else (
-    echo [INFO] Creating Python virtual environment with %PYTHON_CMD%...
+echo [INFO] Ensuring Python virtual environment with %PYTHON_CMD%...
+echo.
+%PYTHON_CMD% ..\scripts\dev\ensure_venv.py venv
+
+if errorlevel 1 (
+    color 0C
     echo.
-    %PYTHON_CMD% -m venv venv
-
-    if errorlevel 1 (
-        color 0C
-        echo.
-        echo [ERROR] Failed to create virtual environment
-        echo.
-        echo If using Python 3.14+, try installing Python 3.11 instead
-        cd ..
-        pause
-        exit /b 1
-    )
-
-    echo [OK] Virtual environment created with %PYTHON_VERSION%
+    echo [ERROR] Failed to create virtual environment
+    echo.
+    echo If using Python 3.14+, try installing Python 3.11 instead
+    cd ..
+    pause
+    exit /b 1
 )
+
+set VENV_PYTHON=venv\Scripts\python.exe
+for /f "tokens=*" %%i in ('"%VENV_PYTHON%" --version 2^>^&1') do set VENV_PYTHON_VERSION=%%i
+echo [OK] Virtual environment ready: %VENV_PYTHON_VERSION%
 
 timeout /t 1 >nul
 
@@ -225,29 +222,27 @@ echo   [Step 5/6] Installing Backend
 echo ========================================
 echo.
 
-echo [INFO] Activating virtual environment...
-call venv\Scripts\activate.bat
-
-if errorlevel 1 (
+echo [INFO] Verifying virtual environment interpreter...
+if not exist "%VENV_PYTHON%" (
     color 0C
     echo.
-    echo [ERROR] Cannot activate virtual environment
+    echo [ERROR] Virtual environment python not found
     cd ..
     pause
     exit /b 1
 )
 
-echo [OK] Virtual environment activated
+echo [OK] Using %VENV_PYTHON_VERSION%
 echo.
 
 echo [INFO] Upgrading pip...
-python -m pip install --upgrade pip >nul 2>&1
+"%VENV_PYTHON%" -m pip install --upgrade pip >nul 2>&1
 
 echo [INFO] Installing FastAPI, SQLAlchemy, etc...
 echo This may take 2-3 minutes...
 echo.
 
-pip install -r requirements.txt
+"%VENV_PYTHON%" -m pip install -r requirements.txt
 
 if errorlevel 1 (
     color 0C
@@ -255,9 +250,9 @@ if errorlevel 1 (
     echo [ERROR] Backend installation failed
     echo.
     echo Trying to install core packages...
-    pip install fastapi uvicorn[standard]
-    pip install sqlalchemy aiosqlite pydantic
-    pip install psutil aiohttp websockets yt-dlp requests
+    "%VENV_PYTHON%" -m pip install fastapi uvicorn[standard]
+    "%VENV_PYTHON%" -m pip install sqlalchemy aiosqlite pydantic
+    "%VENV_PYTHON%" -m pip install psutil aiohttp websockets yt-dlp requests
 )
 
 echo.
@@ -281,13 +276,13 @@ echo   - Install on demand
 echo   - Can install/uninstall anytime
 echo.
 echo Checking Python compatibility...
-echo %PYTHON_VERSION% | findstr /C:"Python 3.1[2-9]" >nul 2>&1
+echo %VENV_PYTHON_VERSION% | findstr /C:"Python 3.1[2-9]" >nul 2>&1
 if not errorlevel 1 (
-    echo   [WARN] Python %PYTHON_VERSION% NOT compatible with AI
+    echo   [WARN] Python %VENV_PYTHON_VERSION% NOT compatible with AI
     echo   [INFO] AI feature requires Python 3.8-3.11
     echo   [TIP] Rebuild venv with Python 3.11 if needed
 ) else (
-    echo   [OK] Python version compatible: %PYTHON_VERSION%
+    echo   [OK] Python version compatible: %VENV_PYTHON_VERSION%
     echo   [OK] AI feature can be installed in app
 )
 echo.
@@ -324,16 +319,15 @@ if exist "frontend\node_modules\@radix-ui\react-checkbox" (
 )
 
 cd backend
-call venv\Scripts\activate.bat >nul 2>&1
 
-pip show fastapi >nul 2>&1
+"%VENV_PYTHON%" -m pip show fastapi >nul 2>&1
 if errorlevel 1 (
     echo [WARN] FastAPI not found
 ) else (
     echo [OK] FastAPI installed
 )
 
-pip show psutil >nul 2>&1
+"%VENV_PYTHON%" -m pip show psutil >nul 2>&1
 if errorlevel 1 (
     echo [WARN] psutil not found
 ) else (

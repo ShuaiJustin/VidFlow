@@ -7,6 +7,7 @@ from typing import Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 import logging
+import re
 import uuid
 import asyncio
 from datetime import datetime
@@ -68,6 +69,37 @@ class DownloadRequest(BaseModel):
         if not all([result.scheme, result.netloc]):
             raise ValueError('Invalid URL format')
         return v
+
+
+def _apply_download_result(task: DownloadTask, result_data: dict) -> None:
+    task.status = 'completed'
+    task.filename = result_data.get('filename')
+    task.filesize = result_data.get('filesize')
+    actual_quality = str(result_data.get('actual_quality') or '').strip()
+    if actual_quality:
+        task.quality = actual_quality
+    task.completed_at = datetime.now()
+    task.progress = 100.0
+
+
+def _resolve_requested_quality(requested: str, video_info: dict) -> str:
+    requested = str(requested or 'best').strip().lower()
+    if video_info.get('platform') != 'xinpianchang' or requested in {'best', 'audio'}:
+        return requested
+
+    requested_match = re.fullmatch(r'(\d{3,4})p?', requested)
+    heights = sorted({
+        int(item.get('height'))
+        for item in video_info.get('formats') or []
+        if item.get('height')
+    }, reverse=True)
+    if not requested_match or not heights:
+        return requested
+
+    requested_height = int(requested_match.group(1))
+    eligible = [height for height in heights if height <= requested_height]
+    selected_height = eligible[0] if eligible else heights[-1]
+    return f'{selected_height}p'
 
 # API 端点
 @router.post("/info")
@@ -179,6 +211,7 @@ async def start_download(
 
         # 先获取视频信息
         video_info = await downloader.get_video_info(request.url)
+        effective_quality = _resolve_requested_quality(request.quality, video_info)
 
         # 创建任务ID
         task_id = str(uuid.uuid4())
@@ -202,7 +235,7 @@ async def start_download(
             platform=video_info.get('platform'),
             thumbnail=video_info.get('thumbnail'),
             duration=video_info.get('duration'),
-            quality=request.quality,
+            quality=effective_quality,
             format_id=request.format_id,
             output_path=output_path,
             status='pending'
@@ -379,11 +412,7 @@ async def _execute_download(task_id: str, request: DownloadRequest):
                 progress_callback=progress_callback
             )
 
-            task.status = 'completed'
-            task.filename = result_data.get('filename')
-            task.filesize = result_data.get('filesize')
-            task.completed_at = datetime.now()
-            task.progress = 100.0
+            _apply_download_result(task, result_data)
             await db.commit()
 
             # 发送完成状态的 WebSocket 消息，让前端立即更新 UI
@@ -401,7 +430,8 @@ async def _execute_download(task_id: str, request: DownloadRequest):
                 'progress': 100.0,
                 'filename': task.filename,
                 'file_path': file_path,
-                'filesize': task.filesize
+                'filesize': task.filesize,
+                'quality': task.quality,
             })
 
             logger.info(f"Download completed: {task_id}")

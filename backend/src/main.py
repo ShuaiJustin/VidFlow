@@ -55,6 +55,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from src.core.config_manager import get_config_manager
+from src.core.logging_config import DEFAULT_LOG_FORMAT, normalize_log_format
 
 DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = DATA_DIR / "logs"
@@ -67,8 +68,9 @@ config_manager = get_config_manager()
 log_level_raw = os.environ.get("LOG_LEVEL") or config_manager.get("advanced.log_level", "INFO")
 log_format = os.environ.get("LOG_FORMAT") or config_manager.get(
     "advanced.log_format",
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    DEFAULT_LOG_FORMAT,
 )
+log_format = normalize_log_format(log_format)
 valid_levels = {
     "CRITICAL": logging.CRITICAL,
     "ERROR": logging.ERROR,

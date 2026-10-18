@@ -2127,6 +2127,7 @@ async def start_cookie_browser(request: dict = Body(...)):
     try:
         platform = request.get("platform")
         browser = request.get("browser", "chrome")
+        target_url = request.get("target_url")
         logger.info(f"[DEBUG] start_cookie_browser received: platform={platform}, browser={browser}")
         if not platform:
             return {
@@ -2138,7 +2139,7 @@ async def start_cookie_browser(request: dict = Body(...)):
 
         manager = get_cookie_browser_manager()
         logger.info(f"[DEBUG] Calling manager.start_browser with platform={platform}, browser={browser}")
-        result = await manager.start_browser(platform, browser)
+        result = await manager.start_browser(platform, browser, target_url)
 
         # 业务层面的错误直接返回给前端，不抛HTTP异常
         return result

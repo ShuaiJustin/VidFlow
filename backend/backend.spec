@@ -70,7 +70,13 @@ else:
 python_embedded = os.path.join(os.path.dirname(os.path.abspath(SPEC)), 'python_embedded')
 if os.path.exists(python_embedded):
     for root, dirs, files in os.walk(python_embedded):
+        # Cached code and Windows console launchers contain build-machine paths.
+        # Runtime package management uses the relocatable python -m pip entry point.
+        dirs[:] = [name for name in dirs if name.lower() != '__pycache__'
+                   and not (root == python_embedded and name.lower() == 'scripts')]
         for file in files:
+            if file.lower().endswith(('.pyc', '.pyo')):
+                continue
             src = os.path.join(root, file)
             rel_path = os.path.relpath(root, python_embedded)
             dest = os.path.join('python', rel_path) if rel_path != '.' else 'python'
@@ -153,7 +159,6 @@ if BUNDLE_PLAYWRIGHT:
         'playwright.sync_api',
         'playwright.async_api',
         'playwright._impl',
-        'playwright._impl._api_types',
         'playwright._impl._browser',
         'playwright._impl._browser_context',
         'playwright._impl._browser_type',

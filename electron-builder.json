@@ -9,6 +9,8 @@
   },
   "files": [
     "electron/**/*",
+    "!electron/**/*.test.js",
+    "!electron/test-main.js",
     "frontend/dist/**/*",
     "package.json",
     "!**/*.map",

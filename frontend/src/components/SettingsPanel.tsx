@@ -33,10 +33,11 @@ import {
 interface SettingsPanelProps {
   appVersion: string;
   targetCookiePlatform?: string | null;
+  targetCookieUrl?: string | null;
   onCookiePlatformHandled?: () => void;
 }
 
-export function SettingsPanel({ appVersion, targetCookiePlatform, onCookiePlatformHandled }: SettingsPanelProps) {
+export function SettingsPanel({ appVersion, targetCookiePlatform, targetCookieUrl, onCookiePlatformHandled }: SettingsPanelProps) {
   const { settings, updateSettings, resetSettings } = useSettings();
   const [localSettings, setLocalSettings] = useState<Settings>(settings);
   const [hasChanges, setHasChanges] = useState(false);
@@ -206,7 +207,8 @@ export function SettingsPanel({ appVersion, targetCookiePlatform, onCookiePlatfo
       }
 
       if (!updateInfo.has_update) {
-        toast.success('当前已是最新版本');
+        if (!updateInfo.status || updateInfo.status === 'up_to_date') toast.success('当前已是最新版本');
+        else toast.info('暂无可用更新', { description: updateInfo.rollout_message || '当前发布尚未对本设备开放' });
       }
     } catch (error) {
       toast.error('检查新版本失败', {
@@ -731,6 +733,7 @@ export function SettingsPanel({ appVersion, targetCookiePlatform, onCookiePlatfo
             <CookieManager
               onCookieUpdate={fetchStorageInfo}
               targetPlatform={targetCookiePlatform}
+              targetUrl={targetCookieUrl}
               onTargetPlatformHandled={onCookiePlatformHandled}
             />
           </div>

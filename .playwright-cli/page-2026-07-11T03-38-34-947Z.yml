@@ -1,0 +1,8 @@
+- generic [ref=e2]:
+  - generic [ref=e3]: www.xinpianchang.com
+  - generic [ref=e9]: 正在校验浏览器环境,这个过程可能需要几秒,请等待...
+  - iframe [ref=e10]:
+    - generic [ref=f1e5]:
+      - checkbox [ref=f1e6]
+      - generic [ref=f1e7] [cursor=pointer]: 点击勾选框
+  - generic [ref=e11]: 在访问网站之前，需要校验连接和浏览器环境的安全性

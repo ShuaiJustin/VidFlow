@@ -13,6 +13,7 @@ import subprocess
 import logging
 import zipfile
 import tempfile
+import importlib
 from pathlib import Path
 from typing import Optional
 
@@ -60,93 +61,120 @@ class DriverManager:
 
     @property
     def driver_files(self) -> list:
-        """获取当前系统架构所需的驱动文件列表"""
+        """Get required driver files for current architecture."""
         return self.DRIVER_FILES_64 if self._is_64bit else self.DRIVER_FILES_32
 
+    def _iter_candidate_driver_dirs(self) -> list[Path]:
+        """Return directories that may contain WinDivert binaries."""
+        candidates = [self.driver_dir]
+
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            meipass_base = Path(meipass)
+            candidates.extend([
+                meipass_base / 'mitmproxy_windows',
+                meipass_base / 'pydivert' / 'windivert_dll',
+            ])
+
+        for module_name in ('mitmproxy_windows', 'pydivert.windivert_dll'):
+            try:
+                module = importlib.import_module(module_name)
+                module_file = getattr(module, '__file__', None)
+                if module_file:
+                    candidates.append(Path(module_file).resolve().parent)
+            except Exception:
+                logger.debug('Driver module not available: %s', module_name, exc_info=True)
+
+        unique_candidates: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            resolved = Path(candidate)
+            try:
+                resolved = resolved.resolve()
+            except OSError:
+                resolved = Path(candidate)
+            key = str(resolved).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_candidates.append(resolved)
+
+        return unique_candidates
+
+    def _get_missing_files(self, driver_dir: Path) -> list[str]:
+        return [filename for filename in self.driver_files if not (driver_dir / filename).exists()]
+
+    def _find_available_driver_dir(self) -> Optional[Path]:
+        for candidate in self._iter_candidate_driver_dirs():
+            if candidate.exists() and not self._get_missing_files(candidate):
+                return candidate
+        return None
+
     def is_installed(self) -> bool:
-        """检查 WinDivert 驱动是否已安装
+        """Check whether WinDivert binaries are available in the current runtime.
 
-        Returns:
-            驱动文件存在返回 True
+        This recognizes both the project-managed tools/bin/windivert directory
+        and the bundled mitmproxy/pydivert copies used by transparent capture.
         """
-        if not self.driver_dir.exists():
-            return False
-
-        for filename in self.driver_files:
-            if not (self.driver_dir / filename).exists():
-                return False
-
-        return True
+        return self._find_available_driver_dir() is not None
 
     def get_status(self) -> DriverStatus:
-        """获取驱动详细状态
-
-        Returns:
-            DriverStatus: 驱动状态详情
-        """
+        """Get detailed driver status."""
         is_admin = self.check_admin_privileges()
+        driver_dir = self._find_available_driver_dir()
 
-        if not self.driver_dir.exists():
-            return DriverStatus(
-                state=DriverState.NOT_INSTALLED,
-                error_message="驱动目录不存在",
-                is_admin=is_admin,
-            )
+        if driver_dir is None:
+            if self.driver_dir.exists():
+                missing_files = self._get_missing_files(self.driver_dir)
+                error_message = f"缺少驱动文件: {', '.join(missing_files)}" if missing_files else "驱动文件未找到"
+            else:
+                candidate_dirs = "；".join(str(path) for path in self._iter_candidate_driver_dirs())
+                error_message = f"未找到 WinDivert 驱动，可检查以下目录: {candidate_dirs}"
 
-        # 检查驱动文件
-        missing_files = []
-        for filename in self.driver_files:
-            file_path = self.driver_dir / filename
-            if not file_path.exists():
-                missing_files.append(filename)
-
-        if missing_files:
             return DriverStatus(
                 state=DriverState.NOT_INSTALLED,
                 path=str(self.driver_dir),
-                error_message=f"缺少驱动文件: {', '.join(missing_files)}",
+                error_message=error_message,
                 is_admin=is_admin,
             )
 
-        # 尝试获取版本信息
-        version = self._get_driver_version()
-
+        version = self._get_driver_version(driver_dir)
         return DriverStatus(
             state=DriverState.INSTALLED,
             version=version,
-            path=str(self.driver_dir),
+            path=str(driver_dir),
             is_admin=is_admin,
         )
 
-    def _get_driver_version(self) -> Optional[str]:
-        """获取驱动版本信息
-
-        Returns:
-            版本字符串，如果无法获取则返回 None
-        """
+    def _get_driver_version(self, driver_dir: Optional[Path] = None) -> Optional[str]:
+        """Read WinDivert version information if available."""
         try:
-            # 尝试从 DLL 获取版本信息
-            dll_path = self.driver_dir / "WinDivert.dll"
+            resolved_driver_dir = Path(driver_dir) if driver_dir else self._find_available_driver_dir()
+            if resolved_driver_dir is None:
+                return None
+
+            # Try reading version data from the DLL.
+            dll_path = resolved_driver_dir / "WinDivert.dll"
             if not dll_path.exists():
                 return None
 
-            # Windows 版本信息 API
+            # Windows version information API.
             if sys.platform == 'win32':
                 from ctypes import wintypes
 
                 version_dll = ctypes.windll.version
 
-                # 获取版本信息大小
+                # Determine version data buffer size.
                 size = version_dll.GetFileVersionInfoSizeW(str(dll_path), None)
                 if size == 0:
                     return None
 
-                # 获取版本信息
+                # Read version data into memory.
                 buffer = ctypes.create_string_buffer(size)
                 if not version_dll.GetFileVersionInfoW(str(dll_path), 0, size, buffer):
                     return None
 
-                # 查询版本值
+                # Query the fixed file info block.
                 vs_fixedfileinfo = ctypes.c_void_p()
                 length = ctypes.c_uint()
                 if not version_dll.VerQueryValueW(
@@ -154,7 +182,7 @@ class DriverManager:
                 ):
                     return None
 
-                # 解析版本号
+                # Parse the version number.
                 class VS_FIXEDFILEINFO(ctypes.Structure):
                     _fields_ = [
                         ("dwSignature", wintypes.DWORD),
@@ -289,9 +317,15 @@ class DriverManager:
         import aiohttp
 
         # 如果已安装则跳过下载
-        if self.is_installed():
-            version = self._get_driver_version()
-            logger.info(f"WinDivert 驱动已存在，跳过下载 (version={version})")
+        # Reuse bundled drivers when the runtime already ships them.
+        existing_driver_dir = self._find_available_driver_dir()
+        if existing_driver_dir is not None:
+            version = self._get_driver_version(existing_driver_dir)
+            logger.info(
+                "WinDivert 驱动已存在，跳过下载 (version=%s, path=%s)",
+                version,
+                existing_driver_dir,
+            )
             return DriverInstallResult(success=True)
 
         arch_dir = "amd64" if self._is_64bit else "x86"
@@ -461,10 +495,9 @@ class DriverManager:
         return self.is_installed() and self.check_admin_privileges()
 
     def get_dll_path(self) -> Optional[Path]:
-        """获取 WinDivert.dll 路径
-
-        Returns:
-            DLL 文件路径，如果不存在返回 None
-        """
-        dll_path = self.driver_dir / "WinDivert.dll"
+        """Return the active WinDivert.dll path."""
+        driver_dir = self._find_available_driver_dir()
+        if driver_dir is None:
+            return None
+        dll_path = driver_dir / "WinDivert.dll"
         return dll_path if dll_path.exists() else None

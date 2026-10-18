@@ -1076,7 +1076,8 @@ export async function invoke(command: string, args?: any): Promise<any> {
       try {
         const res = await api.post('/api/v1/system/cookies/auto/start-browser', {
           platform: args?.platform,
-          browser: args?.browser
+          browser: args?.browser,
+          target_url: args?.target_url
         }, {
           timeout: CONTROLLED_BROWSER_START_TIMEOUT_MS,
         });

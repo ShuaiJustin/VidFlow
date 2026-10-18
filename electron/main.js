@@ -5,6 +5,8 @@ const fs = require('fs');
 const http = require('http');
 const crypto = require('crypto');
 const { CustomUpdater } = require('./updater-custom');
+const { confirmHealthyUpdate } = require('./updater-health');
+const { removeBackendPortFileAtPath } = require('./backend-port-file');
 
 // 设置应用名称和用户模型 ID（改善开发模式下的通知和任务栏体验）
 // app.setName('VidFlow Desktop');
@@ -49,6 +51,8 @@ if (!gotTheLock) {
 }
 
 let mainWindow;
+let updateWindowReady = false;
+let updateHealthCheck = null;
 let pythonProcess;
 let tray = null;
 let backendPort = null;
@@ -139,7 +143,8 @@ function getConfigFilePath() {
 
 function readUpdatePreferences() {
   const defaultPreferences = {
-    autoUpdate: true
+    autoUpdate: true,
+    updateServerUrl: String(process.env.VIDFLOW_UPDATE_SERVER_URL || '').trim()
   };
 
   try {
@@ -152,7 +157,8 @@ function readUpdatePreferences() {
     const config = JSON.parse(raw);
 
     return {
-      autoUpdate: config?.advanced?.auto_update !== false
+      autoUpdate: config?.advanced?.auto_update !== false,
+      updateServerUrl: String(config?.advanced?.update_server_url || process.env.VIDFLOW_UPDATE_SERVER_URL || '').trim()
     };
   } catch (error) {
     console.warn('[Update] Failed to read update preferences, using defaults:', error.message || error);
@@ -161,17 +167,7 @@ function readUpdatePreferences() {
 }
 
 function removeBackendPortFile() {
-  const portFilePath = getPortFilePath();
-  if (!fs.existsSync(portFilePath)) {
-    return;
-  }
-
-  try {
-    fs.unlinkSync(portFilePath);
-    console.log(`Removed stale backend port file: ${portFilePath}`);
-  } catch (error) {
-    console.warn(`Failed to remove backend port file ${portFilePath}: ${error.message}`);
-  }
+  removeBackendPortFileAtPath(getPortFilePath());
 }
 
 function readBackendPortConfigFromFile() {
@@ -682,6 +678,7 @@ function tryReadPortFile(expectedStartupToken = null) {
 
 // 创建主窗口
 function createWindow() {
+  updateWindowReady = false;
   const isDev = !app.isPackaged;
 
   // 根据平台选择图标格式
@@ -756,7 +753,12 @@ function createWindow() {
     console.log('Window ready to show');
     mainWindow.show();
     mainWindow.focus();
+    updateWindowReady = true;
+    confirmInstalledUpdateHealth();
   });
+
+  mainWindow.webContents.on('render-process-gone', () => { updateWindowReady = false; });
+  mainWindow.webContents.on('did-fail-load', () => { updateWindowReady = false; });
 
   // isDev 已经在函数开头声明过了
   if (isDev) {
@@ -1076,18 +1078,34 @@ function createWindow() {
 }
 
 // 初始化更新器
+function confirmInstalledUpdateHealth() {
+  if (updateHealthCheck) return updateHealthCheck;
+  updateHealthCheck = confirmHealthyUpdate({
+    updater, mainWindow, windowReady: updateWindowReady,
+    backendReady, backendPort, checkBackendHealth,
+    isWindowReady: () => updateWindowReady,
+    isBackendReady: () => backendReady
+  }).catch((error) => { console.error('[Update] Health confirmation failed:', error.message); return false; })
+    .finally(() => { updateHealthCheck = null; });
+  return updateHealthCheck;
+}
+
 function initUpdater() {
-  const configuredUpdateServerUrl = process.env.VIDFLOW_UPDATE_SERVER_URL || 'https://shcrystal.top:8321';
   const configuredUpdateChannel = process.env.VIDFLOW_UPDATE_CHANNEL || 'stable';
   const updatePreferences = readUpdatePreferences();
+  const configuredUpdateServerUrl = updatePreferences.updateServerUrl || process.env.VIDFLOW_UPDATE_SERVER_URL || 'https://shcrystal.top';
+  console.log('[Update] Using update server:', configuredUpdateServerUrl);
 
   try {
+    updater?.dispose();
     // 创建更新器实例
     updater = new CustomUpdater({
       updateServerUrl: configuredUpdateServerUrl,
       channel: configuredUpdateChannel,
       autoCheck: updatePreferences.autoUpdate,
-      autoDownload: updatePreferences.autoUpdate  // 后台静默下载，完成后提示重启
+      autoDownload: updatePreferences.autoUpdate,
+      allowInsecureLocalhost: !app.isPackaged && process.env.VIDFLOW_ALLOW_LOCAL_UPDATE_TEST === '1',
+      allowUnsignedDevelopment: !app.isPackaged && process.env.VIDFLOW_ALLOW_UNSIGNED_UPDATE_TEST === '1'
     });
     updaterError = null;
   } catch (error) {
@@ -1102,6 +1120,7 @@ function initUpdater() {
 
   // 监听更新事件
   updater.on('checking-for-update', () => {
+    confirmInstalledUpdateHealth();
     console.log('[Update] Checking for updates...');
     if (mainWindow) {
       mainWindow.webContents.send('update-checking');
@@ -1127,6 +1146,9 @@ function initUpdater() {
       mainWindow.webContents.send('download-progress', progress);
     }
   });
+
+  updater.on('download-start', () => mainWindow?.webContents.send('download-start'));
+  updater.on('download-cancelled', () => mainWindow?.webContents.send('download-cancelled'));
 
   updater.on('update-downloaded', (info) => {
     console.log('[Update] Update downloaded:', info);
@@ -1164,16 +1186,8 @@ function initUpdater() {
     }
   });
 
-  // 应用启动时自动检查更新（延迟5秒，可由配置关闭）
-  if (updater.autoCheck) {
-    setTimeout(() => {
-      updater.checkForUpdates().catch(err => {
-        console.error('[Update] Check failed:', err);
-      });
-    }, 5000);
-  } else {
-    console.log('[Update] Auto update is disabled by user preference');
-  }
+  updater.startAutoCheck();
+  confirmInstalledUpdateHealth();
 }
 
 // 创建系统托盘
@@ -1440,6 +1454,7 @@ app.whenReady().then(async () => {
         ? 'manual dev backend'
         : (reuseExistingBackend ? 'requested existing backend' : 'healthy dev backend');
       console.log(`✅ Reusing ${reuseReason}: ${existingPort}`);
+      await confirmInstalledUpdateHealth();
       if (mainWindow && mainWindow.webContents) {
         mainWindow.webContents.send('backend-ready', { port: existingPort });
         console.log('📢 Sent backend-ready event to renderer');
@@ -1455,19 +1470,18 @@ app.whenReady().then(async () => {
     return;
   }
 
-  if (isDev) {
-    console.log('[DEV] No healthy existing backend found; starting a fresh backend instance');
-    backendReady = false;
-    backendPort = null;
-    backendError = null;
-    removeBackendPortFile();
-  }
+  console.log(`[${isDev ? 'DEV' : 'PROD'}] No healthy existing backend found; starting a fresh backend instance`);
+  backendReady = false;
+  backendPort = null;
+  backendError = null;
+  removeBackendPortFile();
 
   // 异步启动后端，不阻塞窗口显示
   console.log('Starting backend...');
   try {
     const port = await startPythonBackend();
     console.log('✅ Backend started successfully on port:', port);
+    await confirmInstalledUpdateHealth();
 
     // 通知渲染进程后端已就绪
     if (mainWindow && mainWindow.webContents) {
@@ -1564,6 +1578,7 @@ app.on('before-quit', (event) => {
   console.log('before-quit event triggered!');
   console.log('========================================');
   app.isQuitting = true;
+  updater?.dispose();
 
   if (backendQuitCleanupDone) {
     return;
@@ -1907,7 +1922,7 @@ ipcMain.handle('custom-update-download', async () => {
       return { success: true, type: 'full' };
     }
   } catch (error) {
-    return { success: false, error: error.message };
+    return { success: false, cancelled: error.code === 'ERR_CANCELED', error: error.message };
   }
 });
 
@@ -1917,11 +1932,16 @@ ipcMain.handle('custom-update-install', async () => {
     if (!updater) {
       return { success: false, error: updaterError || 'Updater not initialized' };
     }
-    await updater.quitAndInstall();
-    return { success: true };
+    const result = await updater.quitAndInstall();
+    return { success: true, ...result };
   } catch (error) {
     return { success: false, error: error.message };
   }
+});
+
+ipcMain.handle('custom-update-cancel', () => {
+  if (!updater) return { success: false, error: updaterError || 'Updater not initialized' };
+  return { success: true, cancelled: updater.cancelDownload() };
 });
 
 function quotePowerShellArg(value) {

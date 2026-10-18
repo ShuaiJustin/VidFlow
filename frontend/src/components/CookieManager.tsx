@@ -26,6 +26,7 @@ interface CookiePlatform {
 interface CookieManagerProps {
   onCookieUpdate?: () => void;
   targetPlatform?: string | null;
+  targetUrl?: string | null;
   onTargetPlatformHandled?: () => void;
 }
 
@@ -142,10 +143,11 @@ const validateNetscapeCookieContent = (content: string): CookieValidationResult 
   return { isValid: true, cookieLines };
 };
 
-export const CookieManager: React.FC<CookieManagerProps> = ({ onCookieUpdate, targetPlatform, onTargetPlatformHandled }) => {
+export const CookieManager: React.FC<CookieManagerProps> = ({ onCookieUpdate, targetPlatform, targetUrl, onTargetPlatformHandled }) => {
   const [platforms, setPlatforms] = useState<CookiePlatform[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedPlatform, setSelectedPlatform] = useState<string | null>(null);
+  const [managedBrowserTargetUrl, setManagedBrowserTargetUrl] = useState<string | null>(targetUrl || null);
   const [cookieContent, setCookieContent] = useState('');
   const [cookieValidation, setCookieValidation] = useState<CookieValidationResult>({
     isValid: true,
@@ -308,6 +310,26 @@ export const CookieManager: React.FC<CookieManagerProps> = ({ onCookieUpdate, ta
     }
   };
 
+  const restoreManagedBrowserSession = async () => {
+    try {
+      const response = await invoke('check_selenium_status', {});
+      const session = response?.data;
+      if (!session?.is_running || !session?.platform) {
+        return;
+      }
+
+      setSelectedPlatform(session.platform);
+      if (['chrome', 'edge', 'firefox'].includes(session.browser)) {
+        setSelectedBrowser(session.browser);
+      }
+      setAutoGetMode(true);
+      setBrowserRunning(true);
+      showMessage('info', '已恢复进行中的受控浏览器登录，请登录完成后点击“完成登录”。');
+    } catch (error) {
+      console.warn('Failed to restore managed browser session:', error);
+    }
+  };
+
   // 启动自动获取Cookie流程
   const startAutoGetCookie = async (platform: string) => {
     try {
@@ -317,13 +339,24 @@ export const CookieManager: React.FC<CookieManagerProps> = ({ onCookieUpdate, ta
 
       // 显示加载提示
       const platformName = platforms.find(p => p.platform === platform)?.name || platform;
-      const browserName = browserDisplayName;
-      showMessage('info', `正在启动 ${browserName} 浏览器，请稍候...\n（首次使用可能需要下载 WebDriver，大约需要 10-30 秒）`);
+      const browserForLaunch = platform === 'xinpianchang' ? 'chrome' : selectedBrowser;
+      const browserName = browserForLaunch === 'chrome' ? 'Chrome' : browserForLaunch === 'edge' ? 'Edge' : 'Firefox';
+      if (platform === 'xinpianchang') {
+        setSelectedBrowser('chrome');
+        showMessage('info', '正在启动新片场专用 Chrome，请稍候...\n该窗口使用持久登录状态且不使用 WebDriver。');
+      } else {
+        showMessage('info', `正在启动 ${browserName} 浏览器，请稍候...\n（首次使用可能需要下载 WebDriver，大约需要 10-30 秒）`);
+      }
 
       // 启动浏览器 - TauriIntegration 会将业务错误转换为异常
-      const startResult: any = await invoke('start_cookie_browser', { platform, browser: selectedBrowser });
+      const startResult: any = await invoke('start_cookie_browser', {
+        platform,
+        browser: browserForLaunch,
+        target_url: managedBrowserTargetUrl || undefined,
+      });
 
       // ✅ 只有成功时才会到这里
+      setManagedBrowserTargetUrl(null);
       setBrowserRunning(true);
       const loginUrl = startResult?.url ? String(startResult.url) : '';
       const currentUrl = startResult?.current_url ? String(startResult.current_url) : '';
@@ -473,6 +506,18 @@ export const CookieManager: React.FC<CookieManagerProps> = ({ onCookieUpdate, ta
       console.error('Failed to extract from browser:', error);
 
       const errorMsg = error.message || '提取Cookie失败';
+      const errorMsgLower = String(errorMsg).toLowerCase();
+      const shouldStartManagedBrowser =
+        (errorMsgLower.includes('cookie') &&
+          (errorMsgLower.includes('not found') || errorMsgLower.includes('no matching') || errorMsgLower.includes('decrypt') || errorMsgLower.includes('encryption'))) ||
+        (errorMsg.includes('未从') && errorMsg.includes('Cookie')) ||
+        errorMsg.includes('加密');
+
+      if (shouldStartManagedBrowser) {
+        showMessage('info', `${browserDisplayName} 中没有可用Cookie，正在启动受控浏览器登录。`);
+        await startAutoGetCookie(platform);
+        return;
+      }
 
       // 提供友好的错误提示
       if (errorMsg.includes('未找到') && errorMsg.includes('Cookie')) {
@@ -500,7 +545,14 @@ export const CookieManager: React.FC<CookieManagerProps> = ({ onCookieUpdate, ta
   // 初始加载
   useEffect(() => {
     loadCookiesStatus();
+    restoreManagedBrowserSession();
   }, []);
+
+  useEffect(() => {
+    if (targetUrl) {
+      setManagedBrowserTargetUrl(targetUrl);
+    }
+  }, [targetUrl]);
 
   // 当有目标平台时，展开对应分类并滚动到目标平台卡片
   useEffect(() => {
@@ -587,8 +639,9 @@ export const CookieManager: React.FC<CookieManagerProps> = ({ onCookieUpdate, ta
 
           {/* 浏览器选择器 */}
           <div className="space-y-2">
-            <label className="text-sm font-medium">选择浏览器</label>
+            <label htmlFor="cookie-browser" className="text-sm font-medium">选择浏览器</label>
             <select
+              id="cookie-browser"
               value={selectedBrowser}
               onChange={(e) => setSelectedBrowser(e.target.value)}
               className="w-full px-3 py-2 border rounded-md bg-background"
@@ -1012,4 +1065,3 @@ export const CookieManager: React.FC<CookieManagerProps> = ({ onCookieUpdate, ta
 };
 
 export default CookieManager;
-

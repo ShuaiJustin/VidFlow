@@ -1,7 +1,7 @@
 /**
  * Download Manager - 适配 VidFlow-Tauri UI
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from './TauriIntegration';
 import { useSettings } from '../contexts/SettingsContext';
 import { useTaskProgress, DownloadTask, VideoInfo } from '../contexts/TaskProgressContext';
@@ -109,8 +109,79 @@ export function isPlatformCookieConfigured(
   ) ?? false;
 }
 
+export function isXinpianchangSecurityError(platform: string, error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return platform === 'xinpianchang' && /(?:403|forbidden)/i.test(message);
+}
+
+export interface VideoQualityOption {
+  value: string;
+  label: string;
+}
+
+const DEFAULT_VIDEO_QUALITY_OPTIONS: VideoQualityOption[] = [
+  { value: 'best', label: '最佳质量' },
+  { value: '2160p', label: '4K (2160p)' },
+  { value: '1440p', label: '2K (1440p)' },
+  { value: '1080p', label: '1080p' },
+  { value: '720p', label: '720p' },
+  { value: '480p', label: '480p' },
+  { value: 'audio', label: '仅音频' },
+];
+
+export function getAvailableVideoQualityOptions(
+  platform: string | undefined,
+  formats: VideoInfo['formats'] | undefined,
+): VideoQualityOption[] {
+  if (platform !== 'xinpianchang') {
+    return DEFAULT_VIDEO_QUALITY_OPTIONS;
+  }
+
+  const heights = Array.from(new Set(
+    (formats || [])
+      .map(format => Number(format.height || 0))
+      .filter(height => Number.isFinite(height) && height > 0),
+  )).sort((left, right) => right - left);
+
+  if (heights.length === 0) {
+    return DEFAULT_VIDEO_QUALITY_OPTIONS;
+  }
+
+  return [
+    { value: 'best', label: '最佳质量' },
+    ...heights.map(height => ({ value: `${height}p`, label: `${height}p` })),
+    { value: 'audio', label: '仅音频' },
+  ];
+}
+
+export function resolveVideoQualitySelection(
+  selected: string,
+  options: VideoQualityOption[],
+): string {
+  if (options.some(option => option.value === selected)) {
+    return selected;
+  }
+
+  const requestedMatch = selected.match(/^(\d{3,4})p?$/i);
+  const numericOptions = options
+    .map(option => ({ option, match: option.value.match(/^(\d{3,4})p$/i) }))
+    .filter(entry => entry.match)
+    .map(entry => ({ option: entry.option, height: Number(entry.match?.[1]) }))
+    .sort((left, right) => right.height - left.height);
+
+  if (requestedMatch && numericOptions.length > 0) {
+    const requestedHeight = Number(requestedMatch[1]);
+    return (
+      numericOptions.find(entry => entry.height <= requestedHeight) ||
+      numericOptions[numericOptions.length - 1]
+    ).option.value;
+  }
+
+  return numericOptions[0]?.option.value || 'best';
+}
+
 interface DownloadManagerProps {
-  onNavigateToSettings?: (targetPlatform?: string) => void;
+  onNavigateToSettings?: (targetPlatform?: string, targetUrl?: string) => void;
 }
 
 export function DownloadManager({ onNavigateToSettings }: DownloadManagerProps = {}) {
@@ -137,6 +208,13 @@ export function DownloadManager({ onNavigateToSettings }: DownloadManagerProps =
   const [selectedFormat, setSelectedFormat] = useState(settings.defaultFormat || 'mp4');
   const [loading, setLoading] = useState(false); // downloading state
   const [thumbnailError, setThumbnailError] = useState(false); // thumbnail load error
+  const qualityOptions = getAvailableVideoQualityOptions(videoInfo?.platform, videoInfo?.formats);
+
+  useEffect(() => {
+    if (!videoInfo) return;
+    const options = getAvailableVideoQualityOptions(videoInfo.platform, videoInfo.formats);
+    setSelectedQuality(current => resolveVideoQualitySelection(current, options));
+  }, [videoInfo]);
 
   // 设置 URL
   const setUrl = (newUrl: string) => {
@@ -277,6 +355,13 @@ export function DownloadManager({ onNavigateToSettings }: DownloadManagerProps =
       setVideoInfo(info as VideoInfo);
       toast.success('视频信息获取成功');
     } catch (error: any) {
+      if (isXinpianchangSecurityError(platform, error)) {
+        setVideoCookieWarning({
+          platform,
+          platformName: '新片场',
+          reason: 'security_check',
+        });
+      }
       toast.error('获取视频信息失败', {
         description: error.message || '请检查链接是否正确'
       });
@@ -476,23 +561,31 @@ export function DownloadManager({ onNavigateToSettings }: DownloadManagerProps =
                   <Cookie className="size-5 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <h4 className="font-semibold text-amber-900 dark:text-amber-100 mb-1">
-                      {cookieWarning.platformName} 需要配置 Cookie
+                      {cookieWarning.reason === 'security_check'
+                        ? '新片场需要完成安全验证'
+                        : `${cookieWarning.platformName} 需要配置 Cookie`}
                     </h4>
                     <p className="text-sm text-amber-800 dark:text-amber-200 mb-2">
-                      该平台有反爬虫机制，配置Cookie后可以获得更好的下载体验。
-                      <br />
-                      <span className="text-xs">注：未配置Cookie可能导致下载失败或只能下载低画质视频</span>
+                      {cookieWarning.reason === 'security_check' ? (
+                        <>请在受控浏览器打开的视频详情页完成勾选验证，然后点击“完成登录”。</>
+                      ) : (
+                        <>
+                          该平台有反爬虫机制，配置Cookie后可以获得更好的下载体验。
+                          <br />
+                          <span className="text-xs">注：未配置Cookie可能导致下载失败或只能下载低画质视频</span>
+                        </>
+                      )}
                     </p>
                     <Button
                       size="sm"
                       variant="outline"
                       className="bg-white dark:bg-gray-900"
                       onClick={() => {
-                        onNavigateToSettings?.(cookieWarning.platform);
+                        onNavigateToSettings?.(cookieWarning.platform, cleanUrl(url));
                       }}
                     >
                       <Settings className="size-3 mr-2" />
-                      前往配置 Cookie
+                      {cookieWarning.reason === 'security_check' ? '前往安全验证' : '前往配置 Cookie'}
                     </Button>
                   </div>
                 </div>
@@ -586,13 +679,11 @@ export function DownloadManager({ onNavigateToSettings }: DownloadManagerProps =
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="best">最佳质量</SelectItem>
-                      <SelectItem value="2160p">4K (2160p)</SelectItem>
-                      <SelectItem value="1440p">2K (1440p)</SelectItem>
-                      <SelectItem value="1080p">1080p</SelectItem>
-                      <SelectItem value="720p">720p</SelectItem>
-                      <SelectItem value="480p">480p</SelectItem>
-                      <SelectItem value="audio">仅音频</SelectItem>
+                      {qualityOptions.map(option => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>

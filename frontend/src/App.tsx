@@ -64,13 +64,15 @@ function AppContent() {
   const [appVersion, setAppVersion] = useState<string>(packageJson.version);
   const [isMaximized, setIsMaximized] = useState(false);
   const [targetCookiePlatform, setTargetCookiePlatform] = useState<string | null>(null);
+  const [targetCookieUrl, setTargetCookieUrl] = useState<string | null>(null);
   const [showAboutDialog, setShowAboutDialog] = useState(false);
 
   // 导航到设置页面的 Cookie 配置
-  const handleNavigateToSettings = (platform?: string) => {
+  const handleNavigateToSettings = (platform?: string, targetUrl?: string) => {
     if (platform) {
       setTargetCookiePlatform(platform);
     }
+    setTargetCookieUrl(targetUrl || null);
     setActiveTab('settings');
   };
 
@@ -452,7 +454,11 @@ function AppContent() {
                 <SettingsPanel
                   appVersion={appVersion}
                   targetCookiePlatform={targetCookiePlatform}
-                  onCookiePlatformHandled={() => setTargetCookiePlatform(null)}
+                  targetCookieUrl={targetCookieUrl}
+                  onCookiePlatformHandled={() => {
+                    setTargetCookiePlatform(null);
+                    setTargetCookieUrl(null);
+                  }}
                 />
               )}
             </div>
