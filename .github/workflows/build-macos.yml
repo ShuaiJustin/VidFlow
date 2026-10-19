@@ -69,6 +69,9 @@ jobs:
           backend/venv/bin/python -m pip install --upgrade pip setuptools wheel
           backend/venv/bin/python -m pip install -r backend/requirements.txt
 
+      - name: Verify platform navigation
+        run: npm --prefix frontend run test:run -- src/__tests__/App.platform.test.tsx
+
       - name: Build frontend and native Python backend
         run: npm run build:all
 
@@ -85,6 +88,9 @@ jobs:
           codesign --force --deep --sign - --entitlements build/entitlements.mac.plist "$app_dir"
           codesign --verify --deep --strict --verbose=2 "$app_dir"
           printf 'APP_DIR=%s\n' "$app_dir" >> "$GITHUB_ENV"
+
+      - name: Smoke test macOS tray and Dock icons
+        run: npx electron scripts/build/smoke-test-desktop-icons.cjs "$APP_DIR/Contents/Resources"
 
       - name: Smoke test the packaged backend
         run: |
