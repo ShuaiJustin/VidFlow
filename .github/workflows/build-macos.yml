@@ -1,0 +1,167 @@
+name: Build macOS installers
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/macos-*']
+    paths:
+      - '.github/workflows/build-macos.yml'
+      - 'backend/**'
+      - 'electron/**'
+      - 'frontend/**'
+      - 'package*.json'
+      - 'electron-builder.json'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            machine: arm64
+          - arch: x64
+            runner: macos-15-intel
+            machine: x86_64
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      VIDFLOW_BUNDLE_TOOLS: '0'
+      VIDFLOW_BUNDLE_PLAYWRIGHT: '1'
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          architecture: ${{ matrix.arch }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Verify native build architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: |
+          test "$(node -p process.arch)" = "$EXPECTED_ARCH"
+          test "$(python -c 'import platform; print(platform.machine())')" = "$EXPECTED_MACHINE"
+
+      - name: Install frontend and backend dependencies
+        run: |
+          npm ci
+          npm ci --prefix frontend
+          python -m venv backend/venv
+          backend/venv/bin/python -m pip install --upgrade pip setuptools wheel
+          backend/venv/bin/python -m pip install -r backend/requirements.txt
+
+      - name: Build frontend and native Python backend
+        run: npm run build:all
+
+      - name: Package and ad-hoc sign the application
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: |
+          npx electron-builder --mac --"$BUILD_ARCH" --dir --publish never --config electron-builder.json
+          app_dir="$(find dist-output -maxdepth 2 -name VidFlow.app -type d -print -quit)"
+          test -n "$app_dir"
+          test "$(lipo -archs "$app_dir/Contents/Resources/backend/VidFlow-Backend")" = "$EXPECTED_MACHINE"
+          test "$(lipo -archs "$app_dir/Contents/MacOS/VidFlow")" = "$EXPECTED_MACHINE"
+          codesign --force --deep --sign - --entitlements build/entitlements.mac.plist "$app_dir"
+          codesign --verify --deep --strict --verbose=2 "$app_dir"
+          printf 'APP_DIR=%s\n' "$app_dir" >> "$GITHUB_ENV"
+
+      - name: Smoke test the packaged backend
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import socket
+          import subprocess
+          import tempfile
+          import time
+          import urllib.error
+          import urllib.request
+
+          backend = pathlib.Path(os.environ['APP_DIR']).resolve() / 'Contents/Resources/backend/VidFlow-Backend'
+          with tempfile.TemporaryDirectory(prefix='vidflow-smoke-') as directory:
+              with socket.socket() as listener:
+                  listener.bind(('127.0.0.1', 0))
+                  port = listener.getsockname()[1]
+              environment = dict(os.environ, HOME=directory, VIDFLOW_FIXED_PORT=str(port))
+              environment.pop('PYTHONPATH', None)
+              log_path = pathlib.Path('dist-output/backend-smoke.log')
+              with log_path.open('w') as log:
+                  process = subprocess.Popen([str(backend)], cwd=directory, env=environment, stdout=log, stderr=subprocess.STDOUT)
+                  try:
+                      deadline = time.monotonic() + 90
+                      while time.monotonic() < deadline:
+                          if process.poll() is not None:
+                              raise RuntimeError(f'Packaged backend exited with {process.returncode}')
+                          try:
+                              with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=2) as response:
+                                  health = json.load(response)
+                              if health.get('status') == 'healthy':
+                                  print('Packaged backend /health passed:', health)
+                                  break
+                          except (OSError, urllib.error.URLError):
+                              pass
+                          time.sleep(1)
+                      else:
+                          raise RuntimeError('Packaged backend did not become healthy within 90 seconds')
+                  finally:
+                      if process.poll() is None:
+                          process.terminate()
+                          try:
+                              process.wait(timeout=15)
+                          except subprocess.TimeoutExpired:
+                              process.kill()
+                              process.wait()
+                      print(log_path.read_text())
+          PY
+
+      - name: Create DMG installer and checksum
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          npx electron-builder --mac dmg --"$BUILD_ARCH" --prepackaged "$APP_DIR" --publish never --config electron-builder.json '--config.mac.artifactName=VidFlow-${version}-macOS-${arch}.${ext}'
+          for installer in dist-output/*.dmg; do
+            shasum -a 256 "$installer" > "$installer.sha256"
+          done
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: VidFlow-macOS-${{ matrix.arch }}
+          path: |
+            dist-output/*.dmg
+            dist-output/*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: macOS-${{ matrix.arch }}-diagnostics
+          path: |
+            dist-output/*.log
+            backend/build/VidFlow-Backend/warn-VidFlow-Backend.txt
+          if-no-files-found: ignore
