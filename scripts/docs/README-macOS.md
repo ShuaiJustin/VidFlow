@@ -11,7 +11,8 @@ Mac 界面暂时隐藏视频号入口，现有微信自动捕获实现仍仅面�
 工作流会检查平台导航、打包后的原生图标及后端启动情况。
 
 v1.0.7 的工具下载显式加载随应用打包的 CA 证书包，同时保留系统和自定义
-证书信任。Apple Silicon 使用原生 ARM64 FFmpeg/FFprobe 下载源。
+证书信任。Intel 与 Apple Silicon 分别使用对应架构的 FFmpeg/FFprobe 下载源，
+避免旧 Intel 下载站的连续请求限流。
 分开安装 FFmpeg 和 FFprobe 时，仅替换当前压缩包包含的程序，保留另一个工具。
 云端构建会在不依赖构建机 CA 路径的环境中实际安装并执行 FFmpeg、FFprobe
 和 yt-dlp，验证 HTTPS 下载与二进制架构。
