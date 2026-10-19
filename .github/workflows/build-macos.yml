@@ -72,11 +72,11 @@ jobs:
       - name: Verify platform navigation
         run: npm --prefix frontend run test:run -- src/__tests__/App.platform.test.tsx
 
-      - name: Verify trusted TLS downloads
+      - name: Verify TLS downloads and split Mac archives
         run: |
           backend/venv/bin/python -m pip install pytest pytest-asyncio
           cd backend
-          venv/bin/python -m pytest tests/test_core/test_tool_manager_tls.py -q
+          venv/bin/python -m pytest tests/test_core/test_tool_manager_tls.py tests/test_core/test_tool_manager_mac_archives.py -q
 
       - name: Build frontend and native Python backend
         run: npm run build:all

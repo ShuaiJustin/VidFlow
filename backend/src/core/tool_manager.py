@@ -1021,7 +1021,17 @@ class ToolManager:
 
             # 备份旧文件（更新失败时可恢复）
             backup_files = []
-            for target in [target_ffmpeg, target_ffprobe]:
+            targets = [target_ffmpeg, target_ffprobe]
+            if self.system == 'Darwin' and archive_path.suffix == '.zip':
+                # macOS ships FFmpeg and FFprobe in separate archives. Only
+                # replace binaries present in this archive; keep the sibling.
+                with zipfile.ZipFile(archive_path, 'r') as archive:
+                    packaged_names = {
+                        Path(entry.filename).name.lower()
+                        for entry in archive.infolist() if not entry.is_dir()
+                    }
+                targets = [target for target in targets if target.name.lower() in packaged_names]
+            for target in targets:
                 if target.exists():
                     # 检查文件是否被占用
                     if self._is_file_in_use(target):
