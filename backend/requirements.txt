@@ -27,6 +27,7 @@ aiohttp>=3.9.0
 httpx>=0.25.0
 requests>=2.28.0  # Required by various dependencies
 websocket-client>=1.6.0  # Chrome DevTools Protocol connection
+certifi>=2024.2.2  # Trusted CA bundle for frozen macOS HTTPS downloads
 
 # Video Processing
 yt-dlp>=2023.10.0

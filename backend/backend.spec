@@ -32,6 +32,10 @@ else:
     print(f"Warning: inject_script.js not found: {inject_script_path}")
 datas = []
 datas += inject_script_datas
+certifi_datas = collect_data_files('certifi', includes=['cacert.pem'])
+if not certifi_datas:
+    raise RuntimeError('certifi/cacert.pem is required for verified HTTPS downloads')
+datas += certifi_datas
 binaries = []  # 初始化 binaries 列表
 
 # 如果 tools/bin 目录存在且有文件，则打包工具
