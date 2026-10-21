@@ -11,7 +11,9 @@ const { assertSecureUpdateUrl, resolveDownloadPath, verifyMetadataEnvelope, deco
 class CustomUpdater extends EventEmitter {
   constructor(options = {}) {
     super();
-    this.updateServerUrl = String(options.updateServerUrl || 'https://shcrystal.top').replace(/\/+$/, '');
+    this.releaseSource = options.releaseSource || null;
+    this.downloadRequestOptions = options.downloadRequestOptions || {};
+    this.updateServerUrl = String(options.updateServerUrl || 'https://updates.shcrystal.top').replace(/\/+$/, '');
     this.allowInsecureLocalhost = options.allowInsecureLocalhost === true;
     const server = assertSecureUpdateUrl(this.updateServerUrl, this.allowInsecureLocalhost);
     this.allowedUpdateHosts = new Set(options.allowedUpdateHosts || [server.hostname]);
@@ -87,6 +89,11 @@ class CustomUpdater extends EventEmitter {
   }
 
   async requestUpdateInfo() {
+    if (this.releaseSource) {
+      const info = await this.releaseSource.requestUpdateInfo(this);
+      if (info.has_update) this.validateRelease(info);
+      return info;
+    }
     const response = await this.http.post(`${this.updateServerUrl}/api/v1/updates/check`, {
       current_version: this.currentVersion, platform: this.platform, arch: this.arch,
       user_id: this.userId, channel: this.channel, supported_update_types: ['full']
@@ -200,7 +207,7 @@ class CustomUpdater extends EventEmitter {
         this.emit('download-start', { type: 'full' });
         if (offset < info.file_size) {
           const response = await this.http({ method: 'GET', url: info.download_url, responseType: 'stream',
-            signal, timeout: 30000, maxRedirects: 0, maxContentLength: this.maxDownloadSize, maxBodyLength: this.maxDownloadSize,
+            signal, timeout: 30000, maxRedirects: 0, ...this.downloadRequestOptions, maxContentLength: this.maxDownloadSize, maxBodyLength: this.maxDownloadSize,
             headers: { 'User-Agent': `VidFlow/${this.currentVersion} (${this.platform})`, ...(offset ? { Range: `bytes=${offset}-` } : {}) } });
           if (response.status === 200) offset = 0;
           else if (response.status === 206) {
@@ -258,6 +265,8 @@ class CustomUpdater extends EventEmitter {
   }
 
   async postStat(endpoint, payload) {
+    // GitHub Releases is a static update source, not a telemetry endpoint.
+    if (this.releaseSource) return true;
     try {
       await this.http.post(`${this.updateServerUrl}/api/v1/stats/${endpoint}`, payload, { timeout: 5000, maxRedirects: 0 });
       return true;
@@ -325,6 +334,7 @@ class CustomUpdater extends EventEmitter {
       }
       const openError = await shell.openPath(this.downloadedFilePath);
       if (openError) throw new Error(openError);
+      app.quit();
       return { manualInstall: true, path: this.downloadedFilePath };
     } catch (error) {
       if (marker) {

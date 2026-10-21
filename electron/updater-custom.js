@@ -3,18 +3,28 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const { CustomUpdater: VerifiedUpdater } = require('./updater-core');
+const { GitHubReleaseSource, GITHUB_ASSET_HOSTS, githubRequestOptions } = require('./updater-github');
 
 // Keep the desktop integration API; signing, download and install state live in the shared core.
 class CustomUpdater extends VerifiedUpdater {
   constructor(options = {}) {
     const keyPath = process.env.VIDFLOW_UPDATE_PUBLIC_KEY_PATH || path.join(__dirname, 'update-public-key.pem');
+    const httpClient = options.httpClient || axios.create({ proxy: false });
+    // Explicit server options remain available for isolated legacy/local tests.
+    const useGitHub = !options.updateServerUrl;
     super({
       ...options,
-      updateServerUrl: options.updateServerUrl || process.env.VIDFLOW_UPDATE_SERVER_URL || 'https://shcrystal.top',
+      autoDownload: options.autoDownload === true,
+      ...(useGitHub ? {
+        releaseSource: new GitHubReleaseSource({ repository: options.githubRepository || process.env.VIDFLOW_GITHUB_REPOSITORY, httpClient }),
+        allowedUpdateHosts: GITHUB_ASSET_HOSTS,
+        downloadRequestOptions: githubRequestOptions()
+      } : {}),
+      updateServerUrl: useGitHub ? 'https://github.com' : options.updateServerUrl,
       updatePublicKey: options.updatePublicKey || fs.readFileSync(keyPath, 'utf8'),
       channel: String(options.channel || process.env.VIDFLOW_UPDATE_CHANNEL || 'stable'),
       arch: String(options.arch || process.arch).toLowerCase(),
-      httpClient: options.httpClient || axios.create({ proxy: false }),
+      httpClient,
       downloadPath: options.downloadPath || path.join(app.getPath('downloads'), 'VidFlow', 'updates')
     });
     // ponytail: full-only until a signed, compatible delta format has an independently tested apply path.

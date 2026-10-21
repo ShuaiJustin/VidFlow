@@ -13,7 +13,7 @@ PRIVATE_KEY = re.compile(
     rb"-----BEGIN ((?:[A-Z]+ )*PRIVATE KEY)-----\s+"
     rb"[A-Za-z0-9+/=\r\n]+-----END \1-----"
 )
-UPDATER_FILES = ("updater-core.js", "updater-security.js", "updater-custom.js",
+UPDATER_FILES = ("updater-core.js", "updater-security.js", "updater-custom.js", "updater-github.js",
                  "updater-health.js", "update-public-key.pem")
 
 

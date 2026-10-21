@@ -1,6 +1,14 @@
 name: Build macOS installers
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: true
+    secrets:
+      VIDFLOW_UPDATE_SIGNING_KEY:
+        required: true
   workflow_dispatch:
   push:
     branches: ['codex/macos-*']
@@ -37,6 +45,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - uses: actions/setup-node@v6
         with:
@@ -69,6 +79,9 @@ jobs:
           backend/venv/bin/python -m pip install --upgrade pip setuptools wheel
           backend/venv/bin/python -m pip install -r backend/requirements.txt
 
+      - name: Verify updater and metadata generation
+        run: node --test electron/*.test.js scripts/release/*.test.js
+
       - name: Verify platform navigation
         run: npm --prefix frontend run test:run -- src/__tests__/App.platform.test.tsx
 
@@ -91,6 +104,8 @@ jobs:
           test -n "$app_dir"
           test "$(lipo -archs "$app_dir/Contents/Resources/backend/VidFlow-Backend")" = "$EXPECTED_MACHINE"
           test "$(lipo -archs "$app_dir/Contents/MacOS/VidFlow")" = "$EXPECTED_MACHINE"
+          cmp electron/updater-github.js "$app_dir/Contents/Resources/app/electron/updater-github.js"
+          cmp electron/update-public-key.pem "$app_dir/Contents/Resources/app/electron/update-public-key.pem"
           codesign --force --deep --sign - --entitlements build/entitlements.mac.plist "$app_dir"
           codesign --verify --deep --strict --verbose=2 "$app_dir"
           printf 'APP_DIR=%s\n' "$app_dir" >> "$GITHUB_ENV"
@@ -203,6 +218,31 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
+
+      - name: Download shared release notes
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@v6
+        with:
+          name: release-notes
+          path: release-notes
+
+      - name: Sign GitHub update metadata
+        if: inputs.release_tag != ''
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+          VIDFLOW_UPDATE_SIGNING_KEY: ${{ secrets.VIDFLOW_UPDATE_SIGNING_KEY }}
+          VIDFLOW_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          node scripts/release/generate-github-metadata.js --file "dist-output/VidFlow-${version}-macOS-${BUILD_ARCH}.dmg" --platform darwin --arch "$BUILD_ARCH" --notes-file release-notes/release-notes.md
+
+      - name: Upload signed update metadata
+        if: inputs.release_tag != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: VidFlow-macOS-${{ matrix.arch }}-metadata
+          path: dist-output/vidflow-update-darwin-${{ matrix.arch }}.json
+          if-no-files-found: error
 
       - name: Upload build diagnostics
         if: failure()

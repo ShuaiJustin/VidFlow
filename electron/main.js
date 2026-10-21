@@ -1094,17 +1094,15 @@ function confirmInstalledUpdateHealth() {
 function initUpdater() {
   const configuredUpdateChannel = process.env.VIDFLOW_UPDATE_CHANNEL || 'stable';
   const updatePreferences = readUpdatePreferences();
-  const configuredUpdateServerUrl = updatePreferences.updateServerUrl || process.env.VIDFLOW_UPDATE_SERVER_URL || 'https://shcrystal.top';
-  console.log('[Update] Using update server:', configuredUpdateServerUrl);
+  console.log('[Update] Using GitHub Releases:', process.env.VIDFLOW_GITHUB_REPOSITORY || 'ShuaiJustin/VidFlow');
 
   try {
     updater?.dispose();
     // 创建更新器实例
     updater = new CustomUpdater({
-      updateServerUrl: configuredUpdateServerUrl,
       channel: configuredUpdateChannel,
       autoCheck: updatePreferences.autoUpdate,
-      autoDownload: updatePreferences.autoUpdate,
+      autoDownload: false,
       allowInsecureLocalhost: !app.isPackaged && process.env.VIDFLOW_ALLOW_LOCAL_UPDATE_TEST === '1',
       allowUnsignedDevelopment: !app.isPackaged && process.env.VIDFLOW_ALLOW_UNSIGNED_UPDATE_TEST === '1'
     });
