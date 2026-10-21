@@ -78,6 +78,7 @@ npx electron-builder --mac dmg --arm64 --publish never --config electron-builder
 Windows 本机无法完成本项目的 Mac 原生 Python 后端、DMG 和 codesign 验证，应使用 Mac 或上述 macOS Actions runner。
 
 Mac 首次运行的 FFmpeg/ffprobe 下载保留原下载站，并在下载失败时按架构回退至 OSXExperts 的独立 ZIP 下载源；TLS 和 ZIP 完整性校验继续生效。
+解压时仅精确匹配 `ffmpeg` / `ffprobe`，忽略 Mac ZIP 中的 `._ffmpeg` 等资源元数据，避免覆盖真正的可执行文件。
 
 ## 手动生成更新描述文件
 

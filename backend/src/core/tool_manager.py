@@ -1090,12 +1090,12 @@ class ToolManager:
                     ffprobe_found = False
 
                     for file in zip_ref.namelist():
-                        lower = file.lower()
-                        if lower.endswith(f"ffmpeg{exe_ext}") or lower.endswith(f"ffprobe{exe_ext}"):
+                        name = Path(file).name.lower()
+                        if name in (f"ffmpeg{exe_ext}", f"ffprobe{exe_ext}"):
                             src = extract_dir / file
-                            if not src.exists():
+                            if not src.is_file():
                                 continue
-                            dst = target_ffmpeg if lower.endswith(f"ffmpeg{exe_ext}") else target_ffprobe
+                            dst = target_ffmpeg if name == f"ffmpeg{exe_ext}" else target_ffprobe
                             dst.parent.mkdir(parents=True, exist_ok=True)
                             shutil.move(str(src), str(dst))
                             if self.system != "Windows":

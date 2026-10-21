@@ -52,6 +52,17 @@ async def test_ffprobe_update_does_not_touch_running_ffmpeg(isolated_manager, tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('tool', ['ffmpeg', 'ffprobe'])
+async def test_mac_resource_forks_do_not_replace_real_executables(isolated_manager, tmp_path, tool):
+    manager, binary_dir = isolated_manager
+    await manager.extract_ffmpeg(archive(tmp_path, 'with-resource-fork.zip', {
+        tool: b'real executable',
+        f'__MACOSX/._{tool}': b'AppleDouble metadata',
+    }))
+    assert (binary_dir / tool).read_bytes() == b'real executable'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tool', ['ffmpeg', 'ffprobe'])
 @pytest.mark.parametrize('machine,key', [('arm64', 'Darwin-arm64'), ('x86_64', 'Darwin')])
 async def test_mac_tool_download_falls_back_when_primary_returns_521(
     isolated_manager, tmp_path, monkeypatch, tool, machine, key
