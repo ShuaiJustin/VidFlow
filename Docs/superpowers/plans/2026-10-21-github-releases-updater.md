@@ -13,6 +13,7 @@
 - [ ] Add a tested `scripts/release/generate-github-metadata.js` CLI accepting installer, platform, architecture and notes file; require an Ed25519 private key matching the bundled public key. Generate schema v1 envelopes and exact GitHub asset URLs.
 - [ ] Reuse the existing native macOS workflow for both architectures, retain its signing and smoke checks, and upload signed metadata when called by release workflow. Modernize Windows release build with the required backend virtual environment. Publish all installers and metadata together as a GitHub Release.
 - [ ] Update settings copy and release instructions, test update notifications, run frontend build and all Electron tests, inspect workflow YAML and diffs. Record limitations of local Windows validation and external signing configuration.
+- [ ] Validate actual macOS artifacts on both native runners. If first-run tool smoke checks fail because an upstream download source is down, retain the smoke checks, reproduce the download failure in a local test, add a platform-specific verified-HTTPS fallback, and rebuild.
 
 ## Accepted behavior
 

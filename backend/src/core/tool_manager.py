@@ -278,6 +278,18 @@ TOOL_URLS = {
     }
 }
 
+# Independent macOS mirrors keep first-run installation available during an outage.
+TOOL_FALLBACK_URLS = {
+    "ffmpeg": {
+        "Darwin": ["https://www.osxexperts.net/ffmpeg80intel.zip"],
+        "Darwin-arm64": ["https://www.osxexperts.net/ffmpeg9arm.zip"],
+    },
+    "ffprobe": {
+        "Darwin": ["https://www.osxexperts.net/ffprobe80intel.zip"],
+        "Darwin-arm64": ["https://www.osxexperts.net/ffprobe9arm.zip"],
+    },
+}
+
 class ToolManager:
     """管理下载器依赖的工具（FFmpeg、yt-dlp等）"""
     # 超时配置
@@ -834,9 +846,9 @@ class ToolManager:
             sock_read=self.DOWNLOAD_SOCK_TIMEOUT
         )
 
-        async def _stream_download(session, get_kwargs=None):
+        async def _stream_download(session, request_url, get_kwargs=None):
             get_kwargs = get_kwargs or {}
-            async with session.get(url, **get_kwargs) as response:
+            async with session.get(request_url, **get_kwargs) as response:
                 if response.status != 200:
                     raise RuntimeError(f"Download failed: HTTP {response.status}")
 
@@ -858,20 +870,32 @@ class ToolManager:
                             f"下载中... {downloaded // 1024 // 1024}MB / {max(1, total_size // 1024 // 1024)}MB"
                         )
 
-        # 直连优先
-        if not self.proxy:
-            async with create_http_session(timeout=timeout) as session:
-                await _stream_download(session)
-            return
+        candidates = [url]
+        if self.system == 'Darwin':
+            key = 'Darwin-arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'Darwin'
+            for tool_name in ('ffmpeg', 'ffprobe'):
+                if TOOL_URLS.get(tool_name, {}).get(key) == url:
+                    candidates.extend(TOOL_FALLBACK_URLS.get(tool_name, {}).get(key, []))
 
-        # 有代理：先试代理，失败再直连
-        try:
-            async with create_http_session(timeout=timeout) as session:
-                await _stream_download(session, {"proxy": self.proxy})
-        except Exception as e:
-            logger.info(f"[Tools] Download with proxy failed, retry direct. url={url}, err={e}")
-            async with create_http_session(timeout=timeout) as session:
-                await _stream_download(session)
+        for index, download_url in enumerate(candidates):
+            try:
+                if not self.proxy:
+                    async with create_http_session(timeout=timeout) as session:
+                        await _stream_download(session, download_url)
+                else:
+                    # Preserve proxy-to-direct fallback for each configured source.
+                    try:
+                        async with create_http_session(timeout=timeout) as session:
+                            await _stream_download(session, download_url, {"proxy": self.proxy})
+                    except Exception as error:
+                        logger.info(f"[Tools] Download with proxy failed, retry direct. url={download_url}, err={error}")
+                        async with create_http_session(timeout=timeout) as session:
+                            await _stream_download(session, download_url)
+                return
+            except Exception as error:
+                if index == len(candidates) - 1:
+                    raise
+                logger.warning(f"[Tools] Download source failed, trying macOS mirror: {download_url}: {error}")
 
     def _validate_zip_integrity(self, zip_path: Path) -> bool:
         """校验 ZIP 完整性，返回是否通过。"""
