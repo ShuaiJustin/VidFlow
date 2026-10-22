@@ -2,116 +2,153 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag matching package.json, for example v1.1.0'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  build-windows:
-    name: 构建 Windows 版本
-    runs-on: windows-latest
-
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Validate version and signing key before building
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          VIDFLOW_UPDATE_SIGNING_KEY: ${{ secrets.VIDFLOW_UPDATE_SIGNING_KEY }}
+        run: |
+          node <<'JS'
+          const fs = require('fs');
+          const crypto = require('crypto');
+          const version = require('./package.json').version;
+          if (!/^\d+\.\d+\.\d+$/.test(version) || process.env.RELEASE_TAG !== `v${version}`) throw new Error('Release tag must match stable package.json version');
+          if (!process.env.VIDFLOW_UPDATE_SIGNING_KEY) throw new Error('Configure repository secret VIDFLOW_UPDATE_SIGNING_KEY before releasing');
+          const privateKey = crypto.createPrivateKey(process.env.VIDFLOW_UPDATE_SIGNING_KEY);
+          const publicKey = crypto.createPublicKey(fs.readFileSync('electron/update-public-key.pem'));
+          const derived = crypto.createPublicKey(privateKey);
+          if (privateKey.asymmetricKeyType !== 'ed25519' || !derived.export({ type: 'spki', format: 'der' }).equals(publicKey.export({ type: 'spki', format: 'der' }))) throw new Error('Signing key must match electron/update-public-key.pem');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=v${version}\n`);
+          JS
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$RELEASE_TAG" --jq .body > release-notes.md
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
 
-    - name: 设置 Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '18'
-
-    - name: 设置 Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-
-    - name: 安装根目录依赖
-      run: npm install
-
-    - name: 安装前端依赖
-      run: |
-        cd frontend
-        npm install
-
-    - name: 安装后端依赖
-      run: |
-        cd backend
-        pip install -r requirements.txt
-        pip install pyinstaller
-
-    - name: 构建应用
-      run: npm run build
-
-    - name: 上传构建产物
-      uses: actions/upload-artifact@v3
-      with:
-        name: windows-build
-        path: dist-output/*.exe
+  build-windows:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      VIDFLOW_BUNDLE_TOOLS: '0'
+      VIDFLOW_BUNDLE_PLAYWRIGHT: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix frontend
+          python -m venv backend/venv
+          backend/venv/Scripts/python -m pip install --upgrade pip setuptools wheel
+          backend/venv/Scripts/python -m pip install -r backend/requirements.txt
+      - name: Verify updater and metadata generation
+        run: node --test electron/*.test.js scripts/release/*.test.js
+      - name: Build Windows application
+        run: npm run build:all
+      - name: Package Windows installer
+        run: npx electron-builder --win --x64 --publish never --config electron-builder.json
+      - uses: actions/download-artifact@v6
+        with:
+          name: release-notes
+          path: release-notes
+      - name: Sign GitHub update metadata
+        env:
+          VIDFLOW_UPDATE_SIGNING_KEY: ${{ secrets.VIDFLOW_UPDATE_SIGNING_KEY }}
+          VIDFLOW_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          $releaseVersion = node -p "require('./package.json').version"
+          node scripts/release/generate-github-metadata.js --file "dist-output/VidFlow-Setup-$releaseVersion-x64.exe" --platform win32 --arch x64 --notes-file release-notes/release-notes.md
+      - uses: actions/upload-artifact@v6
+        with:
+          name: VidFlow-Windows-x64
+          path: |
+            dist-output/*.exe
+            dist-output/vidflow-update-win32-x64.json
+          if-no-files-found: error
+          compression-level: 0
 
   build-macos:
-    name: 构建 macOS 版本
-    runs-on: macos-latest
-
-    steps:
-    - uses: actions/checkout@v3
-
-    - name: 设置 Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '18'
-
-    - name: 设置 Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-
-    - name: 安装根目录依赖
-      run: npm install
-
-    - name: 安装前端依赖
-      run: |
-        cd frontend
-        npm install
-
-    - name: 安装后端依赖
-      run: |
-        cd backend
-        pip install -r requirements.txt
-        pip install pyinstaller
-
-    - name: 构建应用
-      run: npm run build:mac
-
-    - name: 上传构建产物
-      uses: actions/upload-artifact@v3
-      with:
-        name: macos-build
-        path: dist-output/*.dmg
+    needs: prepare
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      release_tag: ${{ needs.prepare.outputs.tag }}
+    secrets:
+      VIDFLOW_UPDATE_SIGNING_KEY: ${{ secrets.VIDFLOW_UPDATE_SIGNING_KEY }}
 
   create-release:
-    name: 创建 Release
-    needs: [build-windows, build-macos]
+    needs: [prepare, build-windows, build-macos]
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
-    - uses: actions/checkout@v3
-
-    - name: 下载 Windows 构建
-      uses: actions/download-artifact@v3
-      with:
-        name: windows-build
-        path: ./release
-
-    - name: 下载 macOS 构建
-      uses: actions/download-artifact@v3
-      with:
-        name: macos-build
-        path: ./release
-
-    - name: 创建 Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: release/*
-        draft: false
-        prerelease: false
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: VidFlow-*
+          path: release
+          merge-multiple: true
+      - uses: actions/download-artifact@v6
+        with:
+          name: release-notes
+          path: release-notes
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          test -f release/vidflow-update-win32-x64.json
+          test -f release/vidflow-update-darwin-arm64.json
+          test -f release/vidflow-update-darwin-x64.json
+          gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "VidFlow $RELEASE_TAG" --notes-file release-notes/release-notes.md
+          gh release edit "$RELEASE_TAG" --draft=false --latest

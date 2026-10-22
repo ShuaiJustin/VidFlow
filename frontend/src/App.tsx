@@ -53,6 +53,7 @@ interface ProxyStatus {
 }
 
 function AppContent() {
+  const isMacOS = window.electron?.platform === 'darwin';
   const { state: backendState, retry: retryBackend } = useBackend();
   const [isOnline] = useState(navigator.onLine);
   const [activeTab, setActiveTab] = useState('download');
@@ -85,7 +86,7 @@ function AppContent() {
     { id: 'burn', label: '烧录字幕', icon: Film, description: '将字幕嵌入到视频中' },
     { id: 'logs', label: '日志中心', icon: ScrollText, description: '查看系统运行日志' },
     { id: 'settings', label: '系统设置', icon: Settings, description: '偏好设置和配置' }
-  ];
+  ].filter((item) => !isMacOS || item.id !== 'channels');
 
   // 检测代理
   const handleCheckProxy = async () => {
@@ -446,7 +447,7 @@ function AppContent() {
             <div className="flex-1 overflow-auto">
               {activeTab === 'download' && <DownloadManager onNavigateToSettings={handleNavigateToSettings} />}
               {activeTab === 'tasks' && <TaskManager />}
-              {activeTab === 'channels' && <ChannelsPanel />}
+              {!isMacOS && activeTab === 'channels' && <ChannelsPanel />}
               {activeTab === 'subtitle' && <SubtitleProcessor />}
               {activeTab === 'burn' && <BurnSubtitle />}
               {activeTab === 'logs' && <LogViewer />}

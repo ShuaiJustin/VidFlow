@@ -37,6 +37,7 @@
     }
   ],
   "win": {
+    "artifactName": "VidFlow-Setup-${version}-${arch}.${ext}",
     "target": [
       {
         "target": "nsis",
@@ -57,6 +58,7 @@
     "installerHeaderIcon": "resources/icon.ico"
   },
   "mac": {
+    "artifactName": "VidFlow-${version}-macOS-${arch}.${ext}",
     "target": [
       {
         "target": "dmg",

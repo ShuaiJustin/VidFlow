@@ -80,3 +80,15 @@ test('desktop refuses unsigned remote HTTP and preserves cleanup/download interf
     assert.equal(typeof CustomUpdater.prototype[method], 'function', method);
   }
 });
+
+test('desktop defaults to GitHub Releases', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vidflow-default-updater-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const CustomUpdater = loadDesktopUpdater(directory);
+  const updater = new CustomUpdater({ autoCheck: false, autoDownload: false });
+  t.after(() => updater.dispose());
+
+  assert.equal(updater.releaseSource.repository, 'ShuaiJustin/VidFlow');
+  assert.equal(updater.allowedUpdateHosts.has('github.com'), true);
+  assert.equal(updater.allowedUpdateHosts.has('updates.shcrystal.top'), false);
+});

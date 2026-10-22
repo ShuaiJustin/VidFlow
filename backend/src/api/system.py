@@ -374,10 +374,11 @@ async def _get_github_version(repo: str, timeout: float = 5.0) -> Optional[str]:
     version: Optional[str] = None
     try:
         import aiohttp
+        from src.core.http_client import create_http_session
 
         url = f"https://api.github.com/repos/{repo}/releases/latest"
 
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+        async with create_http_session(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
             async with session.get(url, headers={"User-Agent": "VidFlow"}) as response:
                 if response.status == 200:
                     data = await response.json()

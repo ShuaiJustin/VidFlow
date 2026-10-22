@@ -19,7 +19,7 @@ backend/**/*.pyd
 # Build outputs
 dist/
 dist-output/
-release/
+/release/
 build/**
 !build/entitlements.mac.plist
 build-logs/

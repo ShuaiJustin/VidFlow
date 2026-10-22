@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { CustomUpdater } = require('./updater-custom');
 const { confirmHealthyUpdate } = require('./updater-health');
 const { removeBackendPortFileAtPath } = require('./backend-port-file');
+const { loadTrayIcon } = require('./desktop-icons');
 
 // 设置应用名称和用户模型 ID（改善开发模式下的通知和任务栏体验）
 // app.setName('VidFlow Desktop');
@@ -1093,17 +1094,15 @@ function confirmInstalledUpdateHealth() {
 function initUpdater() {
   const configuredUpdateChannel = process.env.VIDFLOW_UPDATE_CHANNEL || 'stable';
   const updatePreferences = readUpdatePreferences();
-  const configuredUpdateServerUrl = updatePreferences.updateServerUrl || process.env.VIDFLOW_UPDATE_SERVER_URL || 'https://shcrystal.top';
-  console.log('[Update] Using update server:', configuredUpdateServerUrl);
+  console.log('[Update] Using GitHub Releases:', process.env.VIDFLOW_GITHUB_REPOSITORY || 'ShuaiJustin/VidFlow');
 
   try {
     updater?.dispose();
     // 创建更新器实例
     updater = new CustomUpdater({
-      updateServerUrl: configuredUpdateServerUrl,
       channel: configuredUpdateChannel,
       autoCheck: updatePreferences.autoUpdate,
-      autoDownload: updatePreferences.autoUpdate,
+      autoDownload: false,
       allowInsecureLocalhost: !app.isPackaged && process.env.VIDFLOW_ALLOW_LOCAL_UPDATE_TEST === '1',
       allowUnsignedDevelopment: !app.isPackaged && process.env.VIDFLOW_ALLOW_UNSIGNED_UPDATE_TEST === '1'
     });
@@ -1201,40 +1200,16 @@ function createTray() {
   try {
     const isDev = !app.isPackaged;
 
-    // 托盘图标路径
-    // Windows 使用 .ico
-    // macOS 使用 Template 图标（系统会自动适应亮/暗模式）
-    // Linux 使用 .png
-    let iconPath;
-    if (isDev) {
-      // 开发模式：相对于当前文件
-      if (process.platform === 'win32') {
-        iconPath = path.join(__dirname, '../resources/icons/tray-icon.ico');
-      } else {
-        // macOS 和 Linux: 直接使用 tray-icon.png
-        iconPath = path.join(__dirname, '../resources/icons/tray-icon.png');
-      }
-    } else {
-      // 生产模式：使用 process.resourcesPath
-      if (process.platform === 'win32') {
-        iconPath = path.join(process.resourcesPath, 'icons', 'tray-icon.ico');
-      } else {
-        // macOS 和 Linux: 直接使用 tray-icon.png
-        iconPath = path.join(process.resourcesPath, 'icons', 'tray-icon.png');
-      }
-    }
+    const iconsDirectory = isDev
+      ? path.join(__dirname, '../resources/icons')
+      : path.join(process.resourcesPath, 'icons');
+    const trayImage = loadTrayIcon(require('electron').nativeImage, iconsDirectory);
 
-    console.log('Creating tray with icon:', iconPath);
-    console.log('Icon exists:', fs.existsSync(iconPath));
+    console.log('Creating tray with icons from:', iconsDirectory);
     console.log('Mode:', isDev ? 'Development' : 'Production');
     console.log('Platform:', process.platform);
 
-    if (!fs.existsSync(iconPath)) {
-      console.error('❌ Tray icon not found:', iconPath);
-      return;
-    }
-
-    tray = new Tray(iconPath);
+    tray = new Tray(trayImage);
     console.log('✅ Tray created successfully');
 
     // 托盘提示文本
@@ -1242,7 +1217,7 @@ function createTray() {
 
     // 创建托盘右键菜单
     // 使用固定宽度的标签，通过空格填充使菜单更宽
-    const padLabel = (text, width = 24) => {
+    const padLabel = (text, width = process.platform === 'darwin' ? 0 : 24) => {
       const spaces = ' '.repeat(Math.max(0, width - text.length));
       return text + spaces;
     };

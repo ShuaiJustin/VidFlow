@@ -2,6 +2,21 @@
 
 本目录包含用于 macOS 开发和构建的自动化脚本。
 
+## 当前云端 Mac 构建
+
+GitHub Actions 的 `Build macOS installers` 工作流分别在 Apple Silicon 和
+Intel Mac 上构建，生成各自架构的 DMG，不是通用二进制安装包。
+v1.0.6 修复了顶部菜单栏图标，使用支持深浅色和 Retina 的 Template 图片；
+Mac 界面暂时隐藏视频号入口，现有微信自动捕获实现仍仅面向 Windows。
+工作流会检查平台导航、打包后的原生图标及后端启动情况。
+
+v1.0.7 的工具下载显式加载随应用打包的 CA 证书包，同时保留系统和自定义
+证书信任。Intel 与 Apple Silicon 分别使用对应架构的 FFmpeg/FFprobe 下载源，
+避免旧 Intel 下载站的连续请求限流。
+分开安装 FFmpeg 和 FFprobe 时，仅替换当前压缩包包含的程序，保留另一个工具。
+云端构建会在不依赖构建机 CA 路径的环境中实际安装并执行 FFmpeg、FFprobe
+和 yt-dlp，验证 HTTPS 下载与二进制架构。
+
 ## 📋 脚本列表
 
 ### 1. `dev/setup-mac.sh` - 环境初始化

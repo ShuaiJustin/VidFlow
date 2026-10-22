@@ -62,6 +62,7 @@ function assertPathExists(targetPath, description) {
 
 function findInstaller(version) {
   const candidates = [
+    path.join(distOutputDir, `VidFlow-Setup-${version}-x64.exe`),
     path.join(distOutputDir, `VidFlow Setup ${version}.exe`),
     path.join(distOutputDir, `VidFlow-Setup-${version}.exe`)
   ];

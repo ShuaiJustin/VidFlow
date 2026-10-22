@@ -37,12 +37,14 @@ python generate_mac_tray_template.py
 
 ## 在代码中使用
 
-在 `electron/main.js` 中，Electron 会自动处理：
+在 `electron/main.js` 中，必须显式加载 Template 文件。加载普通的
+`tray-icon.png` 不会自动寻找同目录的 Template 文件：
 
 ```javascript
-// 在 macOS 上，Electron 自动识别 Template 后缀
-const trayIconPath = path.join(__dirname, '../resources/icons/tray-icon.png');
-// 如果存在 tray-iconTemplate.png，系统会优先使用它
+const trayIconPath = path.join(__dirname, '../resources/icons/tray-iconTemplate.png');
+const trayImage = nativeImage.createFromPath(trayIconPath);
+trayImage.setTemplateImage(true);
+const tray = new Tray(trayImage);
 ```
 
 ## 图标设计建议

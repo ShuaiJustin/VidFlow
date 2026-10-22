@@ -179,7 +179,7 @@ export function SettingsPanel({ appVersion, targetCookiePlatform, targetCookieUr
 
     setCheckingAppUpdates(true);
     toast.info('正在检查新版本...', {
-      description: '如发现新版本，会在后台自动准备更新'
+      description: '正在检查 GitHub Releases，发现新版本后可选择下载'
     });
 
     try {
@@ -585,7 +585,7 @@ export function SettingsPanel({ appVersion, targetCookiePlatform, targetCookieUr
                   <div className="space-y-0.5">
                     <Label>自动更新</Label>
                     <p className="text-sm text-muted-foreground">
-                      启动后自动检查新版本，并在后台准备更新；修改后下次启动生效
+                      启动后自动检查 GitHub Releases，发现新版本后提示下载；修改后下次启动生效
                     </p>
                   </div>
                   <Switch

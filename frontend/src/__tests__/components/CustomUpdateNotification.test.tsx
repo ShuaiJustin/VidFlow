@@ -32,8 +32,9 @@ describe('update install result handling', () => {
     expect(screen.queryByRole('button', { name: '立即重启' })).not.toBeInTheDocument();
   });
   it('tells macOS users to complete the opened package manually', async () => {
+    window.electron!.platform = 'darwin';
     installUpdate.mockResolvedValue({ success: true, manualInstall: true });
-    ready(); fireEvent.click(screen.getByRole('button', { name: '立即重启' }));
+    ready(); fireEvent.click(screen.getByRole('button', { name: '打开安装包' }));
     await waitFor(() => expect(toast.info).toHaveBeenCalledWith('请完成手动安装', expect.anything()));
   });
   it('offers manual download and surfaces a failed download IPC response', async () => {

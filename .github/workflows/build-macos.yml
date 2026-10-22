@@ -1,0 +1,255 @@
+name: Build macOS installers
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        required: true
+    secrets:
+      VIDFLOW_UPDATE_SIGNING_KEY:
+        required: true
+  workflow_dispatch:
+  push:
+    branches: ['codex/macos-*']
+    paths:
+      - '.github/workflows/build-macos.yml'
+      - 'backend/**'
+      - 'electron/**'
+      - 'frontend/**'
+      - 'package*.json'
+      - 'electron-builder.json'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            machine: arm64
+          - arch: x64
+            runner: macos-15-intel
+            machine: x86_64
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      VIDFLOW_BUNDLE_TOOLS: '0'
+      VIDFLOW_BUNDLE_PLAYWRIGHT: '1'
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          architecture: ${{ matrix.arch }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Verify native build architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: |
+          test "$(node -p process.arch)" = "$EXPECTED_ARCH"
+          test "$(python -c 'import platform; print(platform.machine())')" = "$EXPECTED_MACHINE"
+
+      - name: Install frontend and backend dependencies
+        run: |
+          npm ci
+          npm ci --prefix frontend
+          python -m venv backend/venv
+          backend/venv/bin/python -m pip install --upgrade pip setuptools wheel
+          backend/venv/bin/python -m pip install -r backend/requirements.txt
+
+      - name: Verify updater and metadata generation
+        run: node --test electron/*.test.js scripts/release/*.test.js
+
+      - name: Verify platform navigation
+        run: npm --prefix frontend run test:run -- src/__tests__/App.platform.test.tsx
+
+      - name: Verify TLS downloads and split Mac archives
+        run: |
+          backend/venv/bin/python -m pip install pytest pytest-asyncio
+          cd backend
+          venv/bin/python -m pytest tests/test_core/test_tool_manager_tls.py tests/test_core/test_tool_manager_mac_archives.py -q
+
+      - name: Build frontend and native Python backend
+        run: npm run build:all
+
+      - name: Package and ad-hoc sign the application
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: |
+          npx electron-builder --mac --"$BUILD_ARCH" --dir --publish never --config electron-builder.json
+          app_dir="$(find dist-output -maxdepth 2 -name VidFlow.app -type d -print -quit)"
+          test -n "$app_dir"
+          test "$(lipo -archs "$app_dir/Contents/Resources/backend/VidFlow-Backend")" = "$EXPECTED_MACHINE"
+          test "$(lipo -archs "$app_dir/Contents/MacOS/VidFlow")" = "$EXPECTED_MACHINE"
+          cmp electron/updater-github.js "$app_dir/Contents/Resources/app/electron/updater-github.js"
+          cmp electron/update-public-key.pem "$app_dir/Contents/Resources/app/electron/update-public-key.pem"
+          codesign --force --deep --sign - --entitlements build/entitlements.mac.plist "$app_dir"
+          codesign --verify --deep --strict --verbose=2 "$app_dir"
+          printf 'APP_DIR=%s\n' "$app_dir" >> "$GITHUB_ENV"
+
+      - name: Smoke test macOS tray and Dock icons
+        run: npx electron scripts/build/smoke-test-desktop-icons.cjs "$APP_DIR/Contents/Resources"
+
+      - name: Smoke test backend and real tool installation
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import platform
+          import socket
+          import subprocess
+          import tempfile
+          import time
+          import urllib.error
+          import urllib.request
+
+          backend = pathlib.Path(os.environ['APP_DIR']).resolve() / 'Contents/Resources/backend/VidFlow-Backend'
+          with tempfile.TemporaryDirectory(prefix='vidflow-smoke-') as directory:
+              with socket.socket() as listener:
+                  listener.bind(('127.0.0.1', 0))
+                  port = listener.getsockname()[1]
+              # Eliminate build-host CA paths to reproduce a clean user's Mac.
+              empty_ca_directory = pathlib.Path(directory) / 'empty-ca-directory'
+              empty_ca_directory.mkdir()
+              environment = dict(os.environ, HOME=directory, VIDFLOW_FIXED_PORT=str(port),
+                                 SSL_CERT_FILE=str(pathlib.Path(directory) / 'absent-ca.pem'),
+                                 SSL_CERT_DIR=str(empty_ca_directory),
+                                 TOOLS_AUTO_UPDATE_ENABLED='false',
+                                 PATH='/usr/bin:/bin:/usr/sbin:/sbin')
+              environment.pop('PYTHONPATH', None)
+              log_path = pathlib.Path('dist-output/backend-smoke.log')
+              with log_path.open('w') as log:
+                  process = subprocess.Popen([str(backend)], cwd=directory, env=environment, stdout=log, stderr=subprocess.STDOUT)
+                  try:
+                      deadline = time.monotonic() + 90
+                      while time.monotonic() < deadline:
+                          if process.poll() is not None:
+                              raise RuntimeError(f'Packaged backend exited with {process.returncode}')
+                          try:
+                              with urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=2) as response:
+                                  health = json.load(response)
+                              if health.get('status') == 'healthy':
+                                  print('Packaged backend /health passed:', health)
+                                  break
+                          except (OSError, urllib.error.URLError):
+                              pass
+                          time.sleep(1)
+                      else:
+                          raise RuntimeError('Packaged backend did not become healthy within 90 seconds')
+                      # Wait for first-run setup to finish before testing the UI
+                      # endpoints, avoiding concurrent writes to the same tools.
+                      deadline = time.monotonic() + 660
+                      marker = '[Tools] Auto-update disabled by TOOLS_AUTO_UPDATE_ENABLED'
+                      while marker not in log_path.read_text():
+                          if process.poll() is not None or time.monotonic() >= deadline:
+                              raise RuntimeError('Packaged first-run tool setup did not complete')
+                          time.sleep(1)
+                      for tool in ('ffmpeg', 'ytdlp'):
+                          request = urllib.request.Request(
+                              f'http://127.0.0.1:{port}/api/v1/system/tools/install/{tool}',
+                              data=b'{}', headers={'Content-Type': 'application/json'}, method='POST')
+                          with urllib.request.urlopen(request, timeout=660) as response:
+                              installed = json.load(response)
+                          if not installed.get('success'):
+                              raise RuntimeError(f'{tool} installation failed: {installed}')
+                          print('Packaged tool installation passed:', tool, installed)
+                      tool_directory = pathlib.Path(directory) / 'Library/Application Support/VidFlow/tools/bin'
+                      for tool, argument in (('ffmpeg', '-version'), ('ffprobe', '-version'), ('yt-dlp', '--version')):
+                          executable = tool_directory / tool
+                          if not executable.is_file():
+                              raise RuntimeError(f'Installer did not create {executable}')
+                          architectures = subprocess.check_output(['lipo', '-archs', str(executable)], text=True).split()
+                          if platform.machine() not in architectures:
+                              raise RuntimeError(f'{tool} has wrong architectures: {architectures}')
+                          version = subprocess.check_output([str(executable), argument], stderr=subprocess.STDOUT,
+                                                            text=True, timeout=45).splitlines()[0]
+                          print('Downloaded native tool executed:', tool, architectures, version)
+                  finally:
+                      if process.poll() is None:
+                          process.terminate()
+                          try:
+                              process.wait(timeout=15)
+                          except subprocess.TimeoutExpired:
+                              process.kill()
+                              process.wait()
+                      print(log_path.read_text())
+          PY
+
+      - name: Create DMG installer and checksum
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+        run: |
+          npx electron-builder --mac dmg --"$BUILD_ARCH" --prepackaged "$APP_DIR" --publish never --config electron-builder.json '--config.mac.artifactName=VidFlow-${version}-macOS-${arch}.${ext}'
+          for installer in dist-output/*.dmg; do
+            shasum -a 256 "$installer" > "$installer.sha256"
+          done
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: VidFlow-macOS-${{ matrix.arch }}
+          path: |
+            dist-output/*.dmg
+            dist-output/*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+      - name: Download shared release notes
+        if: inputs.release_tag != ''
+        uses: actions/download-artifact@v6
+        with:
+          name: release-notes
+          path: release-notes
+
+      - name: Sign GitHub update metadata
+        if: inputs.release_tag != ''
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+          VIDFLOW_UPDATE_SIGNING_KEY: ${{ secrets.VIDFLOW_UPDATE_SIGNING_KEY }}
+          VIDFLOW_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          node scripts/release/generate-github-metadata.js --file "dist-output/VidFlow-${version}-macOS-${BUILD_ARCH}.dmg" --platform darwin --arch "$BUILD_ARCH" --notes-file release-notes/release-notes.md
+
+      - name: Upload signed update metadata
+        if: inputs.release_tag != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: VidFlow-macOS-${{ matrix.arch }}-metadata
+          path: dist-output/vidflow-update-darwin-${{ matrix.arch }}.json
+          if-no-files-found: error
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: macOS-${{ matrix.arch }}-diagnostics
+          path: |
+            dist-output/*.log
+            backend/build/VidFlow-Backend/warn-VidFlow-Backend.txt
+          if-no-files-found: ignore

@@ -14,6 +14,7 @@ import json
 import time
 from pathlib import Path
 from typing import Optional, Tuple, Callable, Awaitable
+from .http_client import create_http_session
 
 logger = logging.getLogger(__name__)
 
@@ -262,17 +263,31 @@ logger.info(f"  BUNDLED_BIN_DIR exists: {BUNDLED_BIN_DIR.exists()}")
 TOOL_URLS = {
     "ffmpeg": {
         "Windows": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
-        "Darwin": "https://evermeet.cx/ffmpeg/ffmpeg-7.1.zip",  # 使用稳定版本（带 ffprobe）
+        "Darwin": "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip",
+        "Darwin-arm64": "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip",
         "Linux": "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
     },
     "ffprobe": {
-        "Darwin": "https://evermeet.cx/ffmpeg/ffprobe-7.1.zip",  # Mac 需要单独下载 ffprobe
+        "Darwin": "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffprobe.zip",
+        "Darwin-arm64": "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffprobe.zip",
     },
     "yt-dlp": {
         "Windows": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
         "Darwin": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos",
         "Linux": "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
     }
+}
+
+# Independent macOS mirrors keep first-run installation available during an outage.
+TOOL_FALLBACK_URLS = {
+    "ffmpeg": {
+        "Darwin": ["https://www.osxexperts.net/ffmpeg80intel.zip"],
+        "Darwin-arm64": ["https://www.osxexperts.net/ffmpeg9arm.zip"],
+    },
+    "ffprobe": {
+        "Darwin": ["https://www.osxexperts.net/ffprobe80intel.zip"],
+        "Darwin-arm64": ["https://www.osxexperts.net/ffprobe9arm.zip"],
+    },
 }
 
 class ToolManager:
@@ -597,13 +612,19 @@ class ToolManager:
 
             await asyncio.sleep(interval_seconds)
 
+    def _get_download_url(self, tool_id: str) -> Optional[str]:
+        urls = TOOL_URLS.get(tool_id, {})
+        if self.system == 'Darwin' and platform.machine().lower() in ('arm64', 'aarch64'):
+            return urls.get('Darwin-arm64') or urls.get(self.system)
+        return urls.get(self.system)
+
     async def _get_remote_headers(self, url: str) -> dict:
         """获取远端资源的 ETag / Last-Modified，用于判断是否需要下载"""
         headers = {}
 
         # 尝试 HEAD
         try:
-            async with aiohttp.ClientSession() as session:
+            async with create_http_session() as session:
                 async with session.head(
                     url,
                     allow_redirects=True,
@@ -619,7 +640,7 @@ class ToolManager:
         # 如果 HEAD 失败或无头信息，尝试 Range GET 0-0 获取部分头
         if not headers:
             try:
-                async with aiohttp.ClientSession() as session:
+                async with create_http_session() as session:
                     async with session.get(
                         url,
                         allow_redirects=True,
@@ -642,15 +663,15 @@ class ToolManager:
         timeout = aiohttp.ClientTimeout(total=self.TOTAL_TIMEOUT, connect=self.CONNECT_TIMEOUT)
         # 直连优先
         if not self.proxy:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with create_http_session(timeout=timeout) as session:
                 return await session.get(url, **kwargs)
         # 有代理：先试代理，失败再直连
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with create_http_session(timeout=timeout) as session:
                 return await session.get(url, proxy=self.proxy, **kwargs)
         except Exception as e:
             logger.info(f"[Tools] GET with proxy failed, retry direct. url={url}, err={e}")
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with create_http_session(timeout=timeout) as session:
                 return await session.get(url, **kwargs)
 
     async def _should_download(self, tool_id: str, url: str) -> Tuple[bool, dict]:
@@ -715,7 +736,7 @@ class ToolManager:
                 return
 
             # 获取下载 URL
-            url = TOOL_URLS["yt-dlp" if tool_id == "yt-dlp" else tool_id].get(self.system)
+            url = self._get_download_url(tool_id)
             if not url:
                 logger.warning(f"[Tools] No download URL for {tool_id} on {self.system}")
                 return
@@ -825,9 +846,9 @@ class ToolManager:
             sock_read=self.DOWNLOAD_SOCK_TIMEOUT
         )
 
-        async def _stream_download(session, get_kwargs=None):
+        async def _stream_download(session, request_url, get_kwargs=None):
             get_kwargs = get_kwargs or {}
-            async with session.get(url, **get_kwargs) as response:
+            async with session.get(request_url, **get_kwargs) as response:
                 if response.status != 200:
                     raise RuntimeError(f"Download failed: HTTP {response.status}")
 
@@ -849,20 +870,32 @@ class ToolManager:
                             f"下载中... {downloaded // 1024 // 1024}MB / {max(1, total_size // 1024 // 1024)}MB"
                         )
 
-        # 直连优先
-        if not self.proxy:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                await _stream_download(session)
-            return
+        candidates = [url]
+        if self.system == 'Darwin':
+            key = 'Darwin-arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'Darwin'
+            for tool_name in ('ffmpeg', 'ffprobe'):
+                if TOOL_URLS.get(tool_name, {}).get(key) == url:
+                    candidates.extend(TOOL_FALLBACK_URLS.get(tool_name, {}).get(key, []))
 
-        # 有代理：先试代理，失败再直连
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                await _stream_download(session, {"proxy": self.proxy})
-        except Exception as e:
-            logger.info(f"[Tools] Download with proxy failed, retry direct. url={url}, err={e}")
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                await _stream_download(session)
+        for index, download_url in enumerate(candidates):
+            try:
+                if not self.proxy:
+                    async with create_http_session(timeout=timeout) as session:
+                        await _stream_download(session, download_url)
+                else:
+                    # Preserve proxy-to-direct fallback for each configured source.
+                    try:
+                        async with create_http_session(timeout=timeout) as session:
+                            await _stream_download(session, download_url, {"proxy": self.proxy})
+                    except Exception as error:
+                        logger.info(f"[Tools] Download with proxy failed, retry direct. url={download_url}, err={error}")
+                        async with create_http_session(timeout=timeout) as session:
+                            await _stream_download(session, download_url)
+                return
+            except Exception as error:
+                if index == len(candidates) - 1:
+                    raise
+                logger.warning(f"[Tools] Download source failed, trying macOS mirror: {download_url}: {error}")
 
     def _validate_zip_integrity(self, zip_path: Path) -> bool:
         """校验 ZIP 完整性，返回是否通过。"""
@@ -891,7 +924,7 @@ class ToolManager:
 
     async def download_ffmpeg(self):
         """下载 FFmpeg"""
-        url = TOOL_URLS["ffmpeg"].get(self.system)
+        url = self._get_download_url('ffmpeg')
         if not url:
             raise RuntimeError(f"No FFmpeg download URL for {self.system}")
 
@@ -936,7 +969,7 @@ class ToolManager:
                     # Mac 需要单独下载 ffprobe
                     if self.system == "Darwin":
                         await self._notify_progress("ffmpeg", 60, "开始下载 ffprobe...")
-                        ffprobe_url = TOOL_URLS["ffprobe"].get("Darwin")
+                        ffprobe_url = self._get_download_url('ffprobe')
                         if ffprobe_url:
                             ffprobe_download_path = TOOLS_DIR / "ffprobe_download.zip"
                             ffprobe_temp_path = ffprobe_download_path.with_suffix(ffprobe_download_path.suffix + ".tmp")
@@ -1012,7 +1045,17 @@ class ToolManager:
 
             # 备份旧文件（更新失败时可恢复）
             backup_files = []
-            for target in [target_ffmpeg, target_ffprobe]:
+            targets = [target_ffmpeg, target_ffprobe]
+            if self.system == 'Darwin' and archive_path.suffix == '.zip':
+                # macOS ships FFmpeg and FFprobe in separate archives. Only
+                # replace binaries present in this archive; keep the sibling.
+                with zipfile.ZipFile(archive_path, 'r') as archive:
+                    packaged_names = {
+                        Path(entry.filename).name.lower()
+                        for entry in archive.infolist() if not entry.is_dir()
+                    }
+                targets = [target for target in targets if target.name.lower() in packaged_names]
+            for target in targets:
                 if target.exists():
                     # 检查文件是否被占用
                     if self._is_file_in_use(target):
@@ -1047,12 +1090,12 @@ class ToolManager:
                     ffprobe_found = False
 
                     for file in zip_ref.namelist():
-                        lower = file.lower()
-                        if lower.endswith(f"ffmpeg{exe_ext}") or lower.endswith(f"ffprobe{exe_ext}"):
+                        name = Path(file).name.lower()
+                        if name in (f"ffmpeg{exe_ext}", f"ffprobe{exe_ext}"):
                             src = extract_dir / file
-                            if not src.exists():
+                            if not src.is_file():
                                 continue
-                            dst = target_ffmpeg if lower.endswith(f"ffmpeg{exe_ext}") else target_ffprobe
+                            dst = target_ffmpeg if name == f"ffmpeg{exe_ext}" else target_ffprobe
                             dst.parent.mkdir(parents=True, exist_ok=True)
                             shutil.move(str(src), str(dst))
                             if self.system != "Windows":
@@ -1145,7 +1188,7 @@ class ToolManager:
 
     async def download_ytdlp(self):
         """下载 yt-dlp"""
-        url = TOOL_URLS["yt-dlp"].get(self.system)
+        url = self._get_download_url('yt-dlp')
         if not url:
             raise RuntimeError(f"No yt-dlp download URL for {self.system}")
 

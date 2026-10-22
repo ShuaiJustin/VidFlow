@@ -90,6 +90,8 @@ npm run dev
 
 ## 📦 打包应用
 
+软件内置更新使用 GitHub Releases，支持启动检查、手动检查、下载校验和安装提示。Windows、Intel Mac 与 Apple Silicon Mac 的发布、签名配置和打包步骤见 [GitHub Releases 更新与 Mac 打包](Docs/GITHUB_RELEASE_UPDATES.md)。
+
 ### 推荐：Windows 优化构建
 
 ```bash
